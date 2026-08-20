@@ -80,6 +80,37 @@ SIGNAL_OWNER_NUMBER=+48...
 
 `SIGNAL_OWNER_NUMBER` to Twój prywatny numer Signal, z którego będziesz pisać do asystenta.
 
+## Porty Signal API
+
+`signal-cli-rest-api` nasłuchuje **wewnątrz kontenera na porcie 8080**. Domyślnie wystawiamy go na hoście jako `127.0.0.1:7070`, aby uniknąć konfliktów z innymi usługami.
+
+```text
+host / Raspberry Pi              Docker network
+127.0.0.1:7070  ───────────────▶ signal:8080
+                                      ▲
+                                      │
+                               assistant: Bun
+```
+
+Dlatego:
+
+- z Raspberry Pi używaj `http://127.0.0.1:7070`;
+- z kontenera `assistant` używaj `http://signal:8080`;
+- zmiana `SIGNAL_HTTP_PORT` zmienia tylko port po stronie hosta, nie port wewnątrz kontenera.
+
+Poprawne mapowanie w Compose:
+
+```yaml
+ports:
+  - "127.0.0.1:${SIGNAL_HTTP_PORT:-7070}:8080"
+```
+
+Po uruchomieniu `docker ps` powinien pokazać m.in.:
+
+```text
+127.0.0.1:7070->8080/tcp
+```
+
 ## Rejestracja osobnego konta Signal bez drugiego urządzenia
 
 ### 1. Uruchom tylko serwis Signal
@@ -100,6 +131,12 @@ API jest dostępne lokalnie pod:
 
 ```text
 http://127.0.0.1:7070
+```
+
+Sprawdzenie:
+
+```bash
+curl http://127.0.0.1:7070/v1/accounts
 ```
 
 ### 2. Rozpocznij rejestrację numeru bota
@@ -297,10 +334,16 @@ Assistant health:
 curl http://127.0.0.1:3000/health
 ```
 
+Signal API z hosta:
+
+```text
+http://127.0.0.1:7070
+```
+
 Wewnętrznie kontenery komunikują się przez:
 
 ```text
-assistant → http://signal:7070
+assistant → http://signal:8080
 ```
 
 ## Development
