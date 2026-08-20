@@ -99,7 +99,7 @@ docker compose up -d signal
 API jest dostępne lokalnie pod:
 
 ```text
-http://127.0.0.1:8080
+http://127.0.0.1:7070
 ```
 
 ### 2. Rozpocznij rejestrację numeru bota
@@ -107,7 +107,7 @@ http://127.0.0.1:8080
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  "http://127.0.0.1:8080/v1/register/+48NUMER_BOTA"
+  "http://127.0.0.1:7070/v1/register/+48NUMER_BOTA"
 ```
 
 Signal zwykle wymaga CAPTCHA i może zwrócić:
@@ -152,7 +152,7 @@ Następnie:
 curl -X POST \
   -H "Content-Type: application/json" \
   --data "$(jq -nc --arg captcha "$CAPTCHA" '{captcha:$captcha,use_voice:false}')" \
-  "http://127.0.0.1:8080/v1/register/+48NUMER_BOTA"
+  "http://127.0.0.1:7070/v1/register/+48NUMER_BOTA"
 ```
 
 Używaj świeżo wygenerowanej CAPTCHA i nie wykonuj wielu prób rejestracji jedna po drugiej — Signal stosuje rate limiting.
@@ -164,7 +164,7 @@ Po otrzymaniu kodu, np. `123-456`:
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  "http://127.0.0.1:8080/v1/register/+48NUMER_BOTA/verify/123-456"
+  "http://127.0.0.1:7070/v1/register/+48NUMER_BOTA/verify/123-456"
 ```
 
 Po poprawnej weryfikacji konto bota jest samodzielnym kontem Signal obsługiwanym przez `signal-cli`.
@@ -172,7 +172,7 @@ Po poprawnej weryfikacji konto bota jest samodzielnym kontem Signal obsługiwany
 ### 5. Sprawdź zarejestrowane konto
 
 ```bash
-curl http://127.0.0.1:8080/v1/accounts
+curl http://127.0.0.1:7070/v1/accounts
 ```
 
 Na liście powinien pojawić się `SIGNAL_BOT_NUMBER`.
@@ -187,7 +187,7 @@ curl -X POST \
     "number": "+48NUMER_BOTA",
     "recipients": ["+48TWOJ_NUMER"]
   }' \
-  "http://127.0.0.1:8080/v2/send"
+  "http://127.0.0.1:7070/v2/send"
 ```
 
 ### 7. Przełącz Signal w tryb roboczy
@@ -300,7 +300,7 @@ curl http://127.0.0.1:3000/health
 Wewnętrznie kontenery komunikują się przez:
 
 ```text
-assistant → http://signal:8080
+assistant → http://signal:7070
 ```
 
 ## Development
