@@ -4,6 +4,9 @@ export type AppConfig = {
   signalBotNumber: string;
   signalOwnerNumber: string;
   signalOwnerUuid?: string;
+  openRouterApiKey: string;
+  openRouterModel: string;
+  assistantTimezone: string;
 };
 
 function required(name: string): string {
@@ -29,5 +32,8 @@ export function loadConfig(): AppConfig {
     signalBotNumber: required("SIGNAL_BOT_NUMBER"),
     signalOwnerNumber: required("SIGNAL_OWNER_NUMBER"),
     signalOwnerUuid: optional("SIGNAL_OWNER_UUID"),
+    openRouterApiKey: required("OPENROUTER_API_KEY"),
+    openRouterModel: optional("OPENROUTER_MODEL") ?? "qwen/qwen3.5-flash-02-23",
+    assistantTimezone: optional("ASSISTANT_TIMEZONE") ?? "Europe/Warsaw",
   };
 }
