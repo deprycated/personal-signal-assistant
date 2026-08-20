@@ -7,7 +7,12 @@ export const reminders = sqliteTable(
   {
     id: text("id").primaryKey(),
     title: text("title").notNull(),
+    // Optional occurrence time of the real-world event/appointment.
+    eventAtMs: integer("event_at_ms"),
+    // Actual time at which the Signal notification is delivered.
     scheduledAtMs: integer("scheduled_at_ms").notNull(),
+    // When non-null, scheduledAtMs is relative to eventAtMs by this many minutes.
+    leadMinutes: integer("lead_minutes"),
     nextAttemptAtMs: integer("next_attempt_at_ms").notNull(),
     status: text("status").$type<ReminderStatus>().notNull().default("pending"),
     sourceKey: text("source_key"),
