@@ -1,10 +1,13 @@
 import type { IncomingDirectMessage } from "./signal/types";
 import { SignalClient } from "./signal/client";
 import { logger } from "./logger";
+import { OpenRouterIntentClient } from "./ai/openrouter";
+import { renderIntentResponse } from "./ai/respond";
 
 export class AssistantApp {
   constructor(
     private readonly signal: SignalClient,
+    private readonly intentClient: OpenRouterIntentClient,
     private readonly ownerNumber: string,
   ) {}
 
@@ -16,16 +19,27 @@ export class AssistantApp {
       hasSenderNumber: Boolean(message.senderNumber),
     });
 
-    // Temporary transport-level behavior.
-    // Milestone 1 replaces this with OpenRouter structured intent routing.
-    const response =
-      message.text.toLocaleLowerCase("pl-PL") === "ping"
-        ? "pong"
-        : `Odebrałem: ${message.text}`;
+    if (message.text.toLocaleLowerCase("pl-PL") === "ping") {
+      await this.signal.sendMessage(this.ownerNumber, "pong");
+      return;
+    }
 
-    // Reply to the explicitly configured owner instead of trusting an identifier
-    // copied from an inbound envelope. This also works when sealed sender omits
-    // sourceNumber and only sourceUuid/ACI is available.
-    await this.signal.sendMessage(this.ownerNumber, response);
+    try {
+      const result = await this.intentClient.interpret(message.text);
+      logger.info("Signal message interpreted", {
+        intent: result.intent,
+        confidence: result.confidence,
+        missingInformationCount: result.missingInformation.length,
+      });
+      await this.signal.sendMessage(this.ownerNumber, renderIntentResponse(result));
+    } catch (error) {
+      logger.error("Failed to interpret authorized Signal message", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await this.signal.sendMessage(
+        this.ownerNumber,
+        "Nie udało mi się teraz zinterpretować wiadomości. Spróbuj ponownie za chwilę.",
+      );
+    }
   }
 }
