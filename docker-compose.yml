@@ -7,7 +7,7 @@ services:
     volumes:
       - signal-data:/home/.local/share/signal-cli
     ports:
-      - "127.0.0.1:${SIGNAL_HTTP_PORT:-8080}:8080"
+      - "127.0.0.1:${SIGNAL_HTTP_PORT:-7070}:7070"
     networks:
       - assistant-internal
 
@@ -20,7 +20,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      SIGNAL_API_URL: http://signal:8080
+      SIGNAL_API_URL: http://signal:7070
       SIGNAL_BOT_NUMBER: ${SIGNAL_BOT_NUMBER}
       SIGNAL_OWNER_NUMBER: ${SIGNAL_OWNER_NUMBER}
       SIGNAL_OWNER_UUID: ${SIGNAL_OWNER_UUID:-}
