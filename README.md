@@ -177,22 +177,19 @@ Dla REST API przekaż wartość bez prefiksu `signalcaptcha://`, czyli zaczynaj�
 signal-hcaptcha....
 ```
 
-Najwygodniej zapisać ją do zmiennej:
-
-```bash
-CAPTCHA='signal-hcaptcha....'
-```
-
-Następnie:
+Wklej świeżo wygenerowany token bezpośrednio do requestu:
 
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  --data "$(jq -nc --arg captcha "$CAPTCHA" '{captcha:$captcha,use_voice:false}')" \
+  -d '{
+    "captcha": "signal-hcaptcha.TUTAJ_WKLEJ_SWIeZY_TOKEN",
+    "use_voice": false
+  }' \
   "http://127.0.0.1:7070/v1/register/+48NUMER_BOTA"
 ```
 
-Używaj świeżo wygenerowanej CAPTCHA i nie wykonuj wielu prób rejestracji jedna po drugiej — Signal stosuje rate limiting.
+Nie jest wymagane `jq` ani żadna zmienna powłoki. Używaj świeżo wygenerowanej CAPTCHA i nie wykonuj wielu prób rejestracji jedna po drugiej — Signal stosuje rate limiting.
 
 ### 4. Zweryfikuj kod SMS
 
