@@ -1,11 +1,19 @@
-import { and, asc, eq, gte, lt, lte } from "drizzle-orm";
+import { and, asc, eq, gte, lt, lte, sql } from "drizzle-orm";
 import type { AppDatabase } from "../db/database";
 import { auditLog, reminders, type ReminderRow } from "../db/schema";
 
 export type CreateReminderInput = {
   title: string;
   scheduledAtMs: number;
+  eventAtMs?: number | null;
+  leadMinutes?: number | null;
   sourceKey?: string;
+};
+
+export type UpdateReminderTimingInput = {
+  scheduledAtMs: number;
+  eventAtMs?: number | null;
+  leadMinutes?: number | null;
 };
 
 export class ReminderRepository {
@@ -24,7 +32,9 @@ export class ReminderRepository {
       .values({
         id,
         title: input.title,
+        eventAtMs: input.eventAtMs ?? null,
         scheduledAtMs: input.scheduledAtMs,
+        leadMinutes: input.leadMinutes ?? null,
         nextAttemptAtMs: input.scheduledAtMs,
         sourceKey: input.sourceKey ?? null,
         createdAtMs: now,
@@ -38,7 +48,9 @@ export class ReminderRepository {
 
     if (created.id === id) {
       this.audit("reminder.created", "reminder", created.id, {
+        eventAtMs: created.eventAtMs,
         scheduledAtMs: created.scheduledAtMs,
+        leadMinutes: created.leadMinutes,
       });
     }
     return created;
@@ -62,28 +74,31 @@ export class ReminderRepository {
   }
 
   listBetween(startMs: number, endMs: number, limit = 20): ReminderRow[] {
+    const occurrenceAt = sql<number>`coalesce(${reminders.eventAtMs}, ${reminders.scheduledAtMs})`;
     return this.database.db
       .select()
       .from(reminders)
       .where(
         and(
           eq(reminders.status, "pending"),
-          gte(reminders.scheduledAtMs, startMs),
-          lt(reminders.scheduledAtMs, endMs),
+          gte(occurrenceAt, startMs),
+          lt(occurrenceAt, endMs),
         ),
       )
-      .orderBy(asc(reminders.scheduledAtMs))
+      .orderBy(asc(occurrenceAt))
       .limit(limit)
       .all();
   }
 
-  updateSchedule(id: string, scheduledAtMs: number): ReminderRow | undefined {
+  updateTiming(id: string, input: UpdateReminderTimingInput): ReminderRow | undefined {
     const now = Date.now();
     const result = this.database.db
       .update(reminders)
       .set({
-        scheduledAtMs,
-        nextAttemptAtMs: scheduledAtMs,
+        eventAtMs: input.eventAtMs ?? null,
+        scheduledAtMs: input.scheduledAtMs,
+        leadMinutes: input.leadMinutes ?? null,
+        nextAttemptAtMs: input.scheduledAtMs,
         status: "pending",
         claimedAtMs: null,
         updatedAtMs: now,
@@ -92,8 +107,22 @@ export class ReminderRepository {
       .run();
 
     if (result.changes !== 1) return undefined;
-    this.audit("reminder.updated", "reminder", id, { scheduledAtMs });
+    this.audit("reminder.updated", "reminder", id, {
+      eventAtMs: input.eventAtMs ?? null,
+      scheduledAtMs: input.scheduledAtMs,
+      leadMinutes: input.leadMinutes ?? null,
+    });
     return this.getById(id);
+  }
+
+  updateSchedule(id: string, scheduledAtMs: number): ReminderRow | undefined {
+    const current = this.getById(id);
+    if (!current) return undefined;
+    return this.updateTiming(id, {
+      scheduledAtMs,
+      eventAtMs: current.eventAtMs,
+      leadMinutes: current.leadMinutes,
+    });
   }
 
   claimDue(nowMs = Date.now(), limit = 10): ReminderRow[] {
