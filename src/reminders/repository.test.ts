@@ -29,10 +29,7 @@ describe("ReminderRepository", () => {
     const database = createDatabase(":memory:");
     try {
       const repository = new ReminderRepository(database);
-      const reminder = repository.create({
-        title: "test",
-        scheduledAtMs: 1_000,
-      });
+      const reminder = repository.create({ title: "test", scheduledAtMs: 1_000 });
 
       const firstClaim = repository.claimDue(2_000);
       const secondClaim = repository.claimDue(2_000);
@@ -68,6 +65,22 @@ describe("ReminderRepository", () => {
           expect(row?.status).toBe("failed");
         }
       }
+    } finally {
+      database.close();
+    }
+  });
+
+  test("stale sending claims are recovered after a process crash", () => {
+    const database = createDatabase(":memory:");
+    try {
+      const repository = new ReminderRepository(database);
+      const reminder = repository.create({ title: "test", scheduledAtMs: 1_000 });
+      expect(repository.claimDue(2_000)[0]?.id).toBe(reminder.id);
+      expect(repository.getById(reminder.id)?.status).toBe("sending");
+
+      expect(repository.recoverStaleClaims(4_000, 1_000)).toBe(1);
+      expect(repository.getById(reminder.id)?.status).toBe("pending");
+      expect(repository.claimDue(4_000)[0]?.id).toBe(reminder.id);
     } finally {
       database.close();
     }

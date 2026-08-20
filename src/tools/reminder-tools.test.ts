@@ -9,26 +9,25 @@ function executionContext(sourceMessageKey: string, nowMs: number) {
   return { ownerKey: "owner", sourceMessageKey, toolCallIndex: 0, nowMs };
 }
 
+function createRegistry(reminders: ReminderRepository, contexts: ConversationContextRepository) {
+  return new ToolRegistry(
+    createReminderTools(reminders, contexts, "Europe/Warsaw"),
+    new ToolPolicy(["reminder_schedule", "reminder_update", "reminder_list"]),
+  );
+}
+
 describe("reminder tools", () => {
   test("preserves an incomplete reminder and completes it from the next message", async () => {
     const database = createDatabase(":memory:");
     try {
       const reminders = new ReminderRepository(database);
       const contexts = new ConversationContextRepository(database);
-      const registry = new ToolRegistry(
-        createReminderTools(reminders, contexts),
-        new ToolPolicy(["reminder_schedule", "reminder_update", "reminder_list"]),
-      );
+      const registry = createRegistry(reminders, contexts);
       const nowMs = Date.parse("2026-08-20T18:00:00Z");
 
       const incomplete = await registry.execute(
         "reminder_schedule",
-        JSON.stringify({
-          title: "dentysta",
-          date: "2026-08-21",
-          time: null,
-          scheduledAt: null,
-        }),
+        JSON.stringify({ title: "dentysta", date: "2026-08-21", time: null }),
         executionContext("signal:1", nowMs),
       );
       expect(incomplete.ok).toBe(true);
@@ -41,12 +40,7 @@ describe("reminder tools", () => {
 
       const completed = await registry.execute(
         "reminder_schedule",
-        JSON.stringify({
-          title: "dentysta",
-          date: "2026-08-21",
-          time: "13:00",
-          scheduledAt: "2026-08-21T13:00:00+02:00",
-        }),
+        JSON.stringify({ title: "dentysta", date: "2026-08-21", time: "13:00" }),
         executionContext("signal:2", nowMs + 1_000),
       );
       expect(completed.ok).toBe(true);
@@ -57,7 +51,8 @@ describe("reminder tools", () => {
         date: "2026-08-21",
         time: "13:00",
       });
-      expect(reminders.listUpcoming(nowMs)).toHaveLength(1);
+      const [stored] = reminders.listUpcoming(nowMs);
+      expect(stored?.scheduledAtMs).toBe(Date.parse("2026-08-21T13:00:00+02:00"));
     } finally {
       database.close();
     }
@@ -68,20 +63,12 @@ describe("reminder tools", () => {
     try {
       const reminders = new ReminderRepository(database);
       const contexts = new ConversationContextRepository(database);
-      const registry = new ToolRegistry(
-        createReminderTools(reminders, contexts),
-        new ToolPolicy(["reminder_schedule", "reminder_update", "reminder_list"]),
-      );
+      const registry = createRegistry(reminders, contexts);
       const nowMs = Date.parse("2026-08-20T18:00:00Z");
 
       await registry.execute(
         "reminder_schedule",
-        JSON.stringify({
-          title: "dentysta",
-          date: "2026-08-21",
-          time: "13:00",
-          scheduledAt: "2026-08-21T13:00:00+02:00",
-        }),
+        JSON.stringify({ title: "dentysta", date: "2026-08-21", time: "13:00" }),
         executionContext("signal:1", nowMs),
       );
       const recentId = contexts.get("owner", nowMs).lastEntity?.id;
@@ -89,12 +76,7 @@ describe("reminder tools", () => {
 
       const updated = await registry.execute(
         "reminder_update",
-        JSON.stringify({
-          reminderId: null,
-          date: "2026-08-21",
-          time: "16:30",
-          scheduledAt: "2026-08-21T16:30:00+02:00",
-        }),
+        JSON.stringify({ reminderId: null, date: "2026-08-21", time: "16:30" }),
         executionContext("signal:2", nowMs + 1_000),
       );
 
@@ -103,6 +85,24 @@ describe("reminder tools", () => {
       expect(reminders.getById(recentId as string)?.scheduledAtMs).toBe(
         Date.parse("2026-08-21T16:30:00+02:00"),
       );
+    } finally {
+      database.close();
+    }
+  });
+
+  test("creation is idempotent for the same Signal message and tool index", async () => {
+    const database = createDatabase(":memory:");
+    try {
+      const reminders = new ReminderRepository(database);
+      const contexts = new ConversationContextRepository(database);
+      const registry = createRegistry(reminders, contexts);
+      const nowMs = Date.parse("2026-08-20T18:00:00Z");
+      const args = JSON.stringify({ title: "dentysta", date: "2026-08-21", time: "13:00" });
+
+      await registry.execute("reminder_schedule", args, executionContext("signal:1", nowMs));
+      await registry.execute("reminder_schedule", args, executionContext("signal:1", nowMs));
+
+      expect(reminders.listUpcoming(nowMs)).toHaveLength(1);
     } finally {
       database.close();
     }

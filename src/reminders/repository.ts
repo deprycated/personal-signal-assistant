@@ -37,7 +37,9 @@ export class ReminderRepository {
     if (!created) throw new Error("Failed to create reminder");
 
     if (created.id === id) {
-      this.audit("reminder.created", created.id, { scheduledAtMs: created.scheduledAtMs });
+      this.audit("reminder.created", "reminder", created.id, {
+        scheduledAtMs: created.scheduledAtMs,
+      });
     }
     return created;
   }
@@ -90,7 +92,7 @@ export class ReminderRepository {
       .run();
 
     if (result.changes !== 1) return undefined;
-    this.audit("reminder.updated", id, { scheduledAtMs });
+    this.audit("reminder.updated", "reminder", id, { scheduledAtMs });
     return this.getById(id);
   }
 
@@ -122,13 +124,39 @@ export class ReminderRepository {
     return claim();
   }
 
+  recoverStaleClaims(nowMs = Date.now(), staleAfterMs = 2 * 60_000): number {
+    const result = this.database.db
+      .update(reminders)
+      .set({
+        status: "pending",
+        claimedAtMs: null,
+        nextAttemptAtMs: nowMs,
+        updatedAtMs: nowMs,
+      })
+      .where(
+        and(
+          eq(reminders.status, "sending"),
+          lte(reminders.claimedAtMs, nowMs - staleAfterMs),
+        ),
+      )
+      .run();
+
+    if (result.changes > 0) {
+      this.audit("reminder.stale_claims_recovered", "scheduler", null, {
+        count: result.changes,
+        staleAfterMs,
+      });
+    }
+    return result.changes;
+  }
+
   markSent(id: string, sentAtMs = Date.now()): void {
     const result = this.database.db
       .update(reminders)
       .set({ status: "sent", sentAtMs, claimedAtMs: null, updatedAtMs: sentAtMs })
       .where(and(eq(reminders.id, id), eq(reminders.status, "sending")))
       .run();
-    if (result.changes === 1) this.audit("reminder.sent", id, { sentAtMs });
+    if (result.changes === 1) this.audit("reminder.sent", "reminder", id, { sentAtMs });
   }
 
   markDeliveryFailure(id: string, failedAtMs = Date.now()): void {
@@ -151,18 +179,28 @@ export class ReminderRepository {
       .where(and(eq(reminders.id, id), eq(reminders.status, "sending")))
       .run();
 
-    this.audit(permanentlyFailed ? "reminder.failed" : "reminder.retry_scheduled", id, {
-      attempts,
-      retryDelayMs: permanentlyFailed ? null : retryDelayMs,
-    });
+    this.audit(
+      permanentlyFailed ? "reminder.failed" : "reminder.retry_scheduled",
+      "reminder",
+      id,
+      {
+        attempts,
+        retryDelayMs: permanentlyFailed ? null : retryDelayMs,
+      },
+    );
   }
 
-  private audit(eventType: string, entityId: string, details: Record<string, unknown>): void {
+  private audit(
+    eventType: string,
+    entityType: string,
+    entityId: string | null,
+    details: Record<string, unknown>,
+  ): void {
     this.database.db
       .insert(auditLog)
       .values({
         eventType,
-        entityType: "reminder",
+        entityType,
         entityId,
         detailsJson: JSON.stringify(details),
         createdAtMs: Date.now(),

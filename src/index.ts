@@ -8,6 +8,7 @@ import { ReminderRepository } from "./reminders/repository";
 import { ReminderScheduler } from "./reminders/scheduler";
 import { SignalClient } from "./signal/client";
 import { SignalListener } from "./signal/listener";
+import { createContextTools } from "./tools/context-tools";
 import { createReminderTools } from "./tools/reminder-tools";
 import { ToolPolicy, ToolRegistry } from "./tools/registry";
 
@@ -23,8 +24,20 @@ const reminderScheduler = new ReminderScheduler(
   config.reminderPollMs,
 );
 
-const toolPolicy = new ToolPolicy(["reminder_schedule", "reminder_update", "reminder_list"]);
-const toolRegistry = new ToolRegistry(createReminderTools(reminders, contexts), toolPolicy);
+const allowedTools = [
+  "reminder_schedule",
+  "reminder_update",
+  "reminder_list",
+  "conversation_cancel_pending",
+] as const;
+const toolPolicy = new ToolPolicy(allowedTools);
+const toolRegistry = new ToolRegistry(
+  [
+    ...createReminderTools(reminders, contexts, config.assistantTimezone),
+    ...createContextTools(contexts),
+  ],
+  toolPolicy,
+);
 const agent = new OpenRouterAgentClient(
   {
     apiKey: config.openRouterApiKey,

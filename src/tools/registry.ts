@@ -53,20 +53,30 @@ export class ToolRegistry {
     registrations: readonly ToolRegistration[],
     private readonly policy: ToolPolicy,
   ) {
-    this.byName = new Map(registrations.map((registration) => [registration.name, registration]));
+    this.byName = new Map();
+    for (const registration of registrations) {
+      if (this.byName.has(registration.name)) {
+        throw new Error(`Duplicate tool registration: ${registration.name}`);
+      }
+      this.byName.set(registration.name, registration);
+    }
   }
 
   definitions(): OpenRouterToolDefinition[] {
     return [...this.byName.values()]
       .filter((registration) => this.policy.allows(registration.name))
-      .map((registration) => ({
-        type: "function" as const,
-        function: {
-          name: registration.name,
-          description: registration.description,
-          parameters: z.toJSONSchema(registration.schema) as Record<string, unknown>,
-        },
-      }));
+      .map((registration) => {
+        const generated = z.toJSONSchema(registration.schema) as Record<string, unknown>;
+        const { $schema: _schemaDeclaration, ...parameters } = generated;
+        return {
+          type: "function" as const,
+          function: {
+            name: registration.name,
+            description: registration.description,
+            parameters,
+          },
+        };
+      });
   }
 
   async execute(
@@ -110,12 +120,12 @@ export class ToolRegistry {
 
     try {
       return await registration.execute(validated.data, context);
-    } catch (error) {
+    } catch {
       return {
         ok: false,
         error: {
           code: "TOOL_EXECUTION_FAILED",
-          message: error instanceof Error ? error.message : "Tool execution failed.",
+          message: "Tool execution failed.",
         },
       };
     }

@@ -1,10 +1,14 @@
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import * as schema from "./schema";
 
 const CURRENT_SCHEMA_VERSION = 2;
 
 export function createDatabase(path: string) {
+  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+
   const sqlite = new Database(path, { create: true, strict: true });
   sqlite.exec("PRAGMA foreign_keys = ON;");
   sqlite.exec("PRAGMA busy_timeout = 5000;");

@@ -42,9 +42,9 @@ export function loadConfig(): AppConfig {
     signalOwnerNumber: required("SIGNAL_OWNER_NUMBER"),
     signalOwnerUuid: optional("SIGNAL_OWNER_UUID"),
     openRouterApiKey: required("OPENROUTER_API_KEY"),
-    openRouterModel: optional("OPENROUTER_MODEL") ?? "qwen/qwen3.5-flash-02-23",
+    openRouterModel: optional("OPENROUTER_MODEL") ?? "deepseek/deepseek-v4-flash-0731",
     assistantTimezone: optional("ASSISTANT_TIMEZONE") ?? "Europe/Warsaw",
-    dbPath: optional("DB_PATH") ?? "/data/assistant.sqlite",
+    dbPath: optional("DB_PATH") ?? "./data/assistant.sqlite",
     reminderPollMs: positiveInteger("REMINDER_POLL_MS", 15_000),
   };
 }

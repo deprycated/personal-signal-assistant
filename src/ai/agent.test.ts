@@ -22,8 +22,8 @@ describe("OpenRouterAgentClient", () => {
       calls += 1;
       const body = JSON.parse(String(init?.body));
       expect(body.response_format).toBeUndefined();
-      expect(body.parallel_tool_calls).toBe(false);
       expect(body.tools[0].function.name).toBe("reminder_list");
+      expect(body.tools[0].function.parameters.$schema).toBeUndefined();
 
       if (calls === 1) {
         expect(body.messages[0].content).toContain("pendingAction");
@@ -85,7 +85,11 @@ describe("OpenRouterAgentClient", () => {
           name: "reminder_schedule",
           description: "Schedule reminder",
           schema: z.object({ time: z.string().nullable() }).strict(),
-          execute: () => ({ ok: true, data: { status: "needs_clarification" }, directReply: "O której?" }),
+          execute: () => ({
+            ok: true,
+            data: { status: "needs_clarification" },
+            directReply: "O której?",
+          }),
         },
       ],
       new ToolPolicy(["reminder_schedule"]),

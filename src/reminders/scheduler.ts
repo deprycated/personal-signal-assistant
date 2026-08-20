@@ -15,6 +15,10 @@ export class ReminderScheduler {
 
   start(): void {
     if (this.running) return;
+    const recovered = this.reminders.recoverStaleClaims();
+    if (recovered > 0) {
+      logger.warn("Recovered stale reminder delivery claims", { count: recovered });
+    }
     this.running = true;
     void this.loop();
   }

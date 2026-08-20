@@ -1,25 +1,17 @@
 import { z } from "zod";
 import type { ConversationContextRepository } from "../context/repository";
 import type { ReminderRepository } from "../reminders/repository";
+import { addCalendarDays, localDateTimeAt, resolveLocalDateTime } from "../time/zoned";
 import type { ToolRegistration } from "./registry";
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
-const zonedDateTimeSchema = z
-  .string()
-  .refine(
-    (value) =>
-      !Number.isNaN(Date.parse(value)) &&
-      /T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(value),
-    "Expected an ISO 8601 date-time with an explicit UTC offset",
-  );
 
 const scheduleSchema = z
   .object({
     title: z.string().trim().min(1).nullable(),
     date: dateSchema.nullable(),
     time: timeSchema.nullable(),
-    scheduledAt: zonedDateTimeSchema.nullable(),
   })
   .strict();
 
@@ -28,14 +20,13 @@ const updateSchema = z
     reminderId: z.string().uuid().nullable(),
     date: dateSchema.nullable(),
     time: timeSchema.nullable(),
-    scheduledAt: zonedDateTimeSchema.nullable(),
   })
   .strict();
 
 const listSchema = z
   .object({
-    from: zonedDateTimeSchema.nullable(),
-    to: zonedDateTimeSchema.nullable(),
+    fromDate: dateSchema.nullable(),
+    throughDate: dateSchema.nullable(),
     limit: z.number().int().min(1).max(20).default(10),
   })
   .strict();
@@ -55,33 +46,16 @@ function clarificationQuestion(missing: string[]): string {
   return "Jakich informacji brakuje do przypomnienia?";
 }
 
-function validateCompleteSchedule(
-  date: string,
-  time: string,
-  scheduledAt: string | null,
-  nowMs: number,
-): { scheduledAtMs: number } | { error: string } {
-  if (!scheduledAt) {
-    return { error: "scheduledAt is required once date and time are complete." };
-  }
-  if (!scheduledAt.startsWith(`${date}T${time}`)) {
-    return { error: "scheduledAt must represent the same local date and time as date/time." };
-  }
-  const scheduledAtMs = Date.parse(scheduledAt);
-  if (!Number.isFinite(scheduledAtMs)) return { error: "scheduledAt is invalid." };
-  if (scheduledAtMs <= nowMs) return { error: "The reminder must be scheduled in the future." };
-  return { scheduledAtMs };
-}
-
 export function createReminderTools(
   reminders: ReminderRepository,
   contexts: ConversationContextRepository,
+  timezone: string,
 ): ToolRegistration[] {
   return [
     {
       name: "reminder_schedule",
       description:
-        "Create a reminder. Use null fields for genuinely missing user information; the application will preserve the draft and ask one focused clarification question.",
+        "Create a reminder. date is YYYY-MM-DD and time is HH:mm in the configured user timezone. Use null for genuinely missing user information; the application preserves the draft and asks one focused clarification.",
       schema: scheduleSchema,
       execute(raw, context) {
         const input = scheduleSchema.parse(raw);
@@ -103,19 +77,23 @@ export function createReminderTools(
           };
         }
 
-        const complete = validateCompleteSchedule(
-          input.date as string,
-          input.time as string,
-          input.scheduledAt,
-          context.nowMs,
-        );
-        if ("error" in complete) {
-          return { ok: false, error: { code: "INVALID_SCHEDULE", message: complete.error } };
+        const resolved = resolveLocalDateTime(input.date as string, input.time as string, timezone);
+        if (!resolved.ok) {
+          return {
+            ok: false,
+            error: { code: "INVALID_LOCAL_DATETIME", message: resolved.error },
+          };
+        }
+        if (resolved.epochMs <= context.nowMs) {
+          return {
+            ok: false,
+            error: { code: "SCHEDULE_IN_PAST", message: "The reminder must be in the future." },
+          };
         }
 
         const reminder = reminders.create({
           title: input.title as string,
-          scheduledAtMs: complete.scheduledAtMs,
+          scheduledAtMs: resolved.epochMs,
           sourceKey: `${context.sourceMessageKey}:reminder:${context.toolCallIndex}`,
         });
         contexts.clearPending(context.ownerKey, context.nowMs);
@@ -129,7 +107,6 @@ export function createReminderTools(
               title: reminder.title,
               date: input.date,
               time: input.time,
-              scheduledAt: input.scheduledAt,
             },
           },
           context.nowMs,
@@ -142,7 +119,8 @@ export function createReminderTools(
             reminder: {
               id: reminder.id,
               title: reminder.title,
-              scheduledAt: input.scheduledAt,
+              date: input.date,
+              time: input.time,
             },
           },
           directReply: `Gotowe. Przypomnę ${input.date} o ${input.time}: ${reminder.title}.`,
@@ -152,7 +130,7 @@ export function createReminderTools(
     {
       name: "reminder_update",
       description:
-        "Change the time/date of an existing pending reminder. For a short correction, use the recent reminder from conversation context. Never invent a reminder id.",
+        "Change the local date/time of an existing pending reminder. For a short correction, use the recent reminder from conversation context. Never invent a reminder id.",
       schema: updateSchema,
       execute(raw, context) {
         const input = updateSchema.parse(raw);
@@ -187,17 +165,21 @@ export function createReminderTools(
           };
         }
 
-        const complete = validateCompleteSchedule(
-          input.date as string,
-          input.time as string,
-          input.scheduledAt,
-          context.nowMs,
-        );
-        if ("error" in complete) {
-          return { ok: false, error: { code: "INVALID_SCHEDULE", message: complete.error } };
+        const resolved = resolveLocalDateTime(input.date as string, input.time as string, timezone);
+        if (!resolved.ok) {
+          return {
+            ok: false,
+            error: { code: "INVALID_LOCAL_DATETIME", message: resolved.error },
+          };
+        }
+        if (resolved.epochMs <= context.nowMs) {
+          return {
+            ok: false,
+            error: { code: "SCHEDULE_IN_PAST", message: "The reminder must be in the future." },
+          };
         }
 
-        const updated = reminders.updateSchedule(reminderId, complete.scheduledAtMs);
+        const updated = reminders.updateSchedule(reminderId, resolved.epochMs);
         if (!updated) {
           return {
             ok: false,
@@ -219,7 +201,6 @@ export function createReminderTools(
               title: updated.title,
               date: input.date,
               time: input.time,
-              scheduledAt: input.scheduledAt,
             },
           },
           context.nowMs,
@@ -228,7 +209,7 @@ export function createReminderTools(
           ok: true,
           data: {
             status: "updated",
-            reminder: { id: updated.id, title: updated.title, scheduledAt: input.scheduledAt },
+            reminder: { id: updated.id, title: updated.title, date: input.date, time: input.time },
           },
           directReply: `Zmienione. Przypomnę ${input.date} o ${input.time}: ${updated.title}.`,
         };
@@ -236,20 +217,31 @@ export function createReminderTools(
     },
     {
       name: "reminder_list",
-      description: "List pending reminders in a requested time range.",
+      description:
+        "List pending reminders for an inclusive local calendar-date range. Use YYYY-MM-DD dates in the configured user timezone.",
       schema: listSchema,
       execute(raw, context) {
         const input = listSchema.parse(raw);
-        const startMs = input.from ? Date.parse(input.from) : context.nowMs;
-        const endMs = input.to ? Date.parse(input.to) : startMs + 7 * 86_400_000;
-        if (endMs <= startMs) {
+        const today = localDateTimeAt(context.nowMs, timezone).date;
+        const fromDate = input.fromDate ?? today;
+        const throughDate = input.throughDate ?? addCalendarDays(fromDate, 6);
+        if (throughDate < fromDate) {
           return {
             ok: false,
-            error: { code: "INVALID_RANGE", message: "The end of the range must be after the start." },
+            error: { code: "INVALID_RANGE", message: "throughDate must not be before fromDate." },
           };
         }
 
-        const rows = reminders.listBetween(startMs, endMs, input.limit);
+        const start = resolveLocalDateTime(fromDate, "00:00", timezone);
+        const end = resolveLocalDateTime(addCalendarDays(throughDate, 1), "00:00", timezone);
+        if (!start.ok || !end.ok) {
+          return {
+            ok: false,
+            error: { code: "INVALID_RANGE", message: "Could not resolve the requested date range." },
+          };
+        }
+
+        const rows = reminders.listBetween(start.epochMs, end.epochMs, input.limit);
         if (rows.length === 0) {
           return {
             ok: true,
@@ -263,7 +255,7 @@ export function createReminderTools(
             reminders: rows.map((row) => ({
               id: row.id,
               title: row.title,
-              scheduledAt: new Date(row.scheduledAtMs).toISOString(),
+              ...localDateTimeAt(row.scheduledAtMs, timezone),
             })),
           },
         };
