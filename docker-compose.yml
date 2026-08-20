@@ -1,0 +1,39 @@
+services:
+  signal:
+    image: bbernhard/signal-cli-rest-api:0.100
+    restart: unless-stopped
+    environment:
+      MODE: ${SIGNAL_MODE:-json-rpc-native}
+    volumes:
+      - signal-data:/home/.local/share/signal-cli
+    ports:
+      - "127.0.0.1:${SIGNAL_HTTP_PORT:-8080}:8080"
+    networks:
+      - assistant-internal
+
+  assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      SIGNAL_API_URL: http://signal:8080
+      SIGNAL_BOT_NUMBER: ${SIGNAL_BOT_NUMBER}
+      SIGNAL_OWNER_NUMBER: ${SIGNAL_OWNER_NUMBER}
+      SIGNAL_OWNER_UUID: ${SIGNAL_OWNER_UUID:-}
+    depends_on:
+      - signal
+    ports:
+      - "127.0.0.1:${ASSISTANT_HTTP_PORT:-3000}:3000"
+    networks:
+      - assistant-internal
+
+networks:
+  assistant-internal:
+    driver: bridge
+
+volumes:
+  signal-data:
