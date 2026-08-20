@@ -11,7 +11,8 @@ type FetchLike = typeof fetch;
 const SYSTEM_PROMPT = `You are the intent layer for a private personal assistant used through Signal.
 Interpret natural Polish messages, including typos, abbreviations, omitted punctuation, and varying word order.
 Do not require commands, prefixes, slash syntax, or special characters.
-Return exactly one structured intent matching the supplied schema.
+Return exactly one valid JSON object matching the supplied schema.
+Your response must contain only JSON and no prose outside the JSON object.
 Never invent material missing information. If an action needs a missing detail, use intent "ambiguous", list what is missing in missingInformation, and put one short Polish clarification question in reply.
 For ordinary conversation use intent "reply" and put the natural Polish answer in reply.
 For action intents, extract only information actually present or safely derivable from the user's wording and current time.
