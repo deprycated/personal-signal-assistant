@@ -1,353 +1,308 @@
 # Personal Signal Assistant — MVP
 
-Pierwszy pionowy slice projektu:
+Self-hosted personal assistant with Signal as the only user interface.
 
-**Signal → auth gate → Bun/TypeScript → Signal response**
+Current vertical slice:
 
-Na tym etapie celowo nie ma OpenRoutera, SQLite ani Google Calendar. Najpierw stabilizujemy i testujemy bezpieczny transport wiadomości.
+**Signal → owner auth gate → OpenRouter structured intent → safe response → Signal**
 
-## Plan projektu
+The assistant is natural-language-first: no slash commands, prefixes, or special syntax are required.
+
+## Status
 
 ### M0 — Signal transport
+
 - [x] Docker Compose
 - [x] `signal-cli-rest-api`
 - [x] Bun + TypeScript
-- [x] WebSocket receive loop
-- [x] reconnect z exponential backoff
-- [x] allowlista właściciela przed handlerem aplikacyjnym
-- [x] opcjonalna weryfikacja Signal UUID
-- [x] odrzucanie grup
-- [x] ignorowanie sync/receipt/typing events
-- [x] wysyłanie odpowiedzi przez `/v2/send`
-- [x] localhost-only ports
-- [x] podstawowe testy parsera i auth
-
-**DoD:** `ping` od właściciela → `pong`; wiadomość od obcego → brak odpowiedzi i brak przekazania dalej.
+- [x] WebSocket receive loop with reconnect/backoff
+- [x] owner allowlist before application/LLM handling
+- [x] Signal UUID/ACI support for sealed sender
+- [x] group rejection
+- [x] ignore sync/receipt/typing events
+- [x] Signal replies through `/v2/send`
+- [x] localhost-only published ports
+- [x] parser/auth tests
 
 ### M1 — OpenRouter / natural language
-- [ ] OpenRouter client
-- [ ] strict structured output / JSON Schema
-- [ ] Zod jako runtime validator
-- [ ] intents: `reply`, `create_note`, `search_notes`, `create_reminder`, `update_reminder`, `calendar_query`, `calendar_create`, `checkpoint_save`, `checkpoint_resume`, `plan_now`, `ambiguous`
-- [ ] `confidence` + `missingInformation`
-- [ ] follow-up context, np. `a jednak 16:30`
 
-**DoD:** `jtro 17 dentsta` jest poprawnie interpretowane, a brakujące istotne dane powodują jedno krótkie pytanie zamiast zgadywania.
+- [x] OpenRouter client
+- [x] strict JSON Schema structured output
+- [x] Zod runtime validation
+- [x] intents: `reply`, `create_note`, `search_notes`, `create_reminder`, `update_reminder`, `calendar_query`, `calendar_create`, `checkpoint_save`, `checkpoint_resume`, `plan_now`, `ambiguous`
+- [x] confidence + missing-information handling
+- [x] natural Polish input including typos and abbreviations
+- [x] deterministic policy boundary: the model interprets but does not execute actions
+- [ ] persisted conversational follow-up context (`a jednak 16:30`) — M2
 
-### M2 — SQLite + reminders
-- [ ] Drizzle + SQLite
-- [ ] `messages`
-- [ ] `conversation_context`
-- [ ] `reminders`
-- [ ] `pending_actions`
-- [ ] `audit_log`
-- [ ] scheduler
-- [ ] reminders wysyłane przez Signal
+Action intents are currently recognized but not executed. Persistence/reminders arrive in M2.
 
-### M3 — notes + recall
-- [ ] Inbox
-- [ ] `note.create`
-- [ ] `note.search`
-- [ ] Markdown
-- [ ] okresowy Git sync do jednego prywatnego repo
-- [ ] oryginalny Inbox pozostaje historią; LLM nie kasuje wejścia
+Default model:
 
-### M4 — Google Calendar
-- [ ] minimalny OAuth scope
-- [ ] read
-- [ ] create
-- [ ] delete wyłączone w MVP
+```text
+qwen/qwen3.5-flash-02-23
+```
 
-### M5 — checkpoint / resume / co-teraz
-- [ ] project contexts
-- [ ] checkpoint save/resume
-- [ ] `co teraz?` zwraca maks. 1–3 konkretne propozycje
+Override it with `OPENROUTER_MODEL`.
 
-## Pierwsze uruchomienie
+## Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Ustaw numery w formacie E.164:
+Minimum configuration:
 
 ```dotenv
+SIGNAL_MODE=json-rpc-native
+SIGNAL_HTTP_PORT=7070
+ASSISTANT_HTTP_PORT=3010
 SIGNAL_BOT_NUMBER=+48...
 SIGNAL_OWNER_NUMBER=+48...
+SIGNAL_OWNER_UUID=
+
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_MODEL=qwen/qwen3.5-flash-02-23
+ASSISTANT_TIMEZONE=Europe/Warsaw
 ```
 
-`SIGNAL_BOT_NUMBER` to osobny numer przeznaczony dla bota. Konto bota jest rejestrowane bezpośrednio przez `signal-cli`; nie trzeba logować tego numeru w aplikacji Signal na drugim telefonie ani linkować go jako dodatkowego urządzenia.
+`SIGNAL_OWNER_UUID` is optional during bootstrap, but recommended after the first inbound message from the owner.
 
-`SIGNAL_OWNER_NUMBER` to Twój prywatny numer Signal, z którego będziesz pisać do asystenta.
+## Ports
 
-## Porty Signal API
-
-`signal-cli-rest-api` nasłuchuje **wewnątrz kontenera na porcie 8080**. Domyślnie wystawiamy go na hoście jako `127.0.0.1:7070`, aby uniknąć konfliktów z innymi usługami.
+`signal-cli-rest-api` listens inside its container on port `8080`. The host port is intentionally different:
 
 ```text
-host / Raspberry Pi              Docker network
-127.0.0.1:7070  ───────────────▶ signal:8080
+Raspberry Pi / host                 Docker network
+127.0.0.1:7070  ───────────────▶  signal:8080
+127.0.0.1:3010  ───────────────▶  assistant:3000
                                       ▲
                                       │
-                               assistant: Bun
+                                 Bun assistant
 ```
 
-Dlatego:
-
-- z Raspberry Pi używaj `http://127.0.0.1:7070`;
-- z kontenera `assistant` używaj `http://signal:8080`;
-- zmiana `SIGNAL_HTTP_PORT` zmienia tylko port po stronie hosta, nie port wewnątrz kontenera.
-
-Poprawne mapowanie w Compose:
-
-```yaml
-ports:
-  - "127.0.0.1:${SIGNAL_HTTP_PORT:-7070}:8080"
-```
-
-Po uruchomieniu `docker ps` powinien pokazać m.in.:
+Container-to-container communication uses:
 
 ```text
-127.0.0.1:7070->8080/tcp
+assistant → http://signal:8080
 ```
 
-## Rejestracja osobnego konta Signal bez drugiego urządzenia
+Changing `SIGNAL_HTTP_PORT` or `ASSISTANT_HTTP_PORT` changes only the host-side port.
 
-### 1. Uruchom tylko serwis Signal
+## Register a dedicated Signal bot account without a second device
 
-Na czas rejestracji ustaw:
+The bot uses its own phone number and is registered directly through `signal-cli`; it is not linked to the owner's Signal account and does not require Signal to be logged in on another phone.
+
+### 1. Start Signal in registration mode
+
+Set:
 
 ```dotenv
 SIGNAL_MODE=native
 ```
 
-Uruchom:
+Then:
 
 ```bash
 docker compose up -d signal
-```
-
-API jest dostępne lokalnie pod:
-
-```text
-http://127.0.0.1:7070
-```
-
-Sprawdzenie:
-
-```bash
 curl http://127.0.0.1:7070/v1/accounts
 ```
 
-### 2. Rozpocznij rejestrację numeru bota
+### 2. Start registration
 
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  "http://127.0.0.1:7070/v1/register/+48NUMER_BOTA"
+  "http://127.0.0.1:7070/v1/register/+48BOT_NUMBER"
 ```
 
-Signal zwykle wymaga CAPTCHA i może zwrócić:
+Signal will normally ask for a CAPTCHA.
 
-```json
-{
-  "error": "Captcha required for verification..."
-}
-```
+### 3. Solve CAPTCHA
 
-### 3. Wygeneruj CAPTCHA
-
-Otwórz:
+Open:
 
 ```text
 https://signalcaptchas.org/registration/generate.html
 ```
 
-Rozwiąż CAPTCHA, następnie skopiuj adres linku **Open Signal**.
-
-Link wygląda mniej więcej tak:
+Solve the CAPTCHA and copy the **Open Signal** link. It looks like:
 
 ```text
 signalcaptcha://signal-hcaptcha....
 ```
 
-Dla REST API przekaż wartość bez prefiksu `signalcaptcha://`, czyli zaczynając od:
-
-```text
-signal-hcaptcha....
-```
-
-Wklej świeżo wygenerowany token bezpośrednio do requestu:
+For this REST registration request, paste the value beginning with `signal-hcaptcha.` directly into the JSON body; no shell variable or `jq` is required:
 
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
   -d '{
-    "captcha": "signal-hcaptcha.TUTAJ_WKLEJ_SWIeZY_TOKEN",
+    "captcha": "signal-hcaptcha.PASTE_FRESH_TOKEN_HERE",
     "use_voice": false
   }' \
-  "http://127.0.0.1:7070/v1/register/+48NUMER_BOTA"
+  "http://127.0.0.1:7070/v1/register/+48BOT_NUMBER"
 ```
 
-Nie jest wymagane `jq` ani żadna zmienna powłoki. Używaj świeżo wygenerowanej CAPTCHA i nie wykonuj wielu prób rejestracji jedna po drugiej — Signal stosuje rate limiting.
+Use a fresh CAPTCHA and avoid repeated rapid registration attempts because Signal rate-limits registration.
 
-### 4. Zweryfikuj kod SMS
+### 4. Verify SMS code
 
-Po otrzymaniu kodu, np. `123-456`:
+For a code such as `123-456`:
 
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
-  "http://127.0.0.1:7070/v1/register/+48NUMER_BOTA/verify/123-456"
+  "http://127.0.0.1:7070/v1/register/+48BOT_NUMBER/verify/123-456"
 ```
 
-Po poprawnej weryfikacji konto bota jest samodzielnym kontem Signal obsługiwanym przez `signal-cli`.
-
-### 5. Sprawdź zarejestrowane konto
+Verify the account:
 
 ```bash
 curl http://127.0.0.1:7070/v1/accounts
 ```
 
-Na liście powinien pojawić się `SIGNAL_BOT_NUMBER`.
-
-### 6. Przetestuj wysyłkę z bota
+### 5. Test direct sending
 
 ```bash
 curl -X POST \
   -H "Content-Type: application/json" \
   -d '{
     "message": "Test asystenta",
-    "number": "+48NUMER_BOTA",
-    "recipients": ["+48TWOJ_NUMER"]
+    "number": "+48BOT_NUMBER",
+    "recipients": ["+48OWNER_NUMBER"]
   }' \
   "http://127.0.0.1:7070/v2/send"
 ```
 
-### 7. Przełącz Signal w tryb roboczy
-
-Po rejestracji ustaw:
+### 6. Switch to runtime mode
 
 ```dotenv
 SIGNAL_MODE=json-rpc-native
 ```
 
-Jeśli platforma nie wspiera tego trybu, użyj:
+Fallback if unsupported by the platform:
 
 ```dotenv
 SIGNAL_MODE=json-rpc
 ```
 
-Uruchom cały stack:
+Then start the whole stack:
 
 ```bash
 docker compose up -d --build
 ```
 
-Logi:
+## Owner UUID / sealed sender
 
-```bash
-docker compose logs -f assistant
-```
+Signal can deliver sealed-sender messages without a phone number in the envelope. In that case the stable sender identifier is UUID/ACI.
 
-## Ustalenie UUID właściciela
-
-Wiadomości Signal mogą przychodzić jako sealed sender, bez numeru telefonu w envelope. W takim przypadku identyfikatorem nadawcy jest Signal UUID/ACI.
-
-Po pierwszej wiadomości od właściciela możesz zobaczyć w logu identyfikator w rodzaju:
+After a known message from the owner, logs may contain:
 
 ```text
-senderUuid=ff603517-3b21-4274-b31b-b0714a6f5a5f
+senderUuid=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-Jeśli potwierdziłeś, że wiadomość została wysłana z Twojego prywatnego konta Signal, ustaw:
+Set that exact value:
 
 ```dotenv
-SIGNAL_OWNER_UUID=ff603517-3b21-4274-b31b-b0714a6f5a5f
+SIGNAL_OWNER_UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-Następnie przebuduj serwis:
+Once configured, UUID is the preferred authorization identity. `SIGNAL_OWNER_NUMBER` remains the bootstrap fallback and the explicit recipient for replies.
 
-```bash
-docker compose up -d --build assistant
+## OpenRouter intent layer
+
+Authorized non-`ping` messages are sent to OpenRouter only after the Signal auth gate succeeds.
+
+The model returns a strict structured object containing:
+
+- one allowed intent;
+- confidence from `0` to `1`;
+- a short optional reply;
+- missing information;
+- normalized action arguments.
+
+The result is validated again with Zod before application code accepts it. The LLM does **not** execute actions directly.
+
+Examples the intent layer is expected to understand:
+
+```text
+jtro 17 dentsta
+jutro koło 17 dentysta
+dentysta jutro 17
 ```
 
-Po skonfigurowaniu UUID jest on preferowanym identyfikatorem właściciela. Numer telefonu pozostaje przydatny do bootstrapu i jako docelowy recipient odpowiedzi.
+If required information is absent:
 
-## Test round-trip
+```text
+dentysta jutro
+```
 
-Wyślij ze swojego prywatnego konta Signal do numeru bota:
+it should ask one short clarification question rather than inventing a time.
+
+At M1, action intents are intentionally not persisted or executed. M2 introduces SQLite, conversation context and reminders.
+
+## Smoke tests
+
+Transport:
 
 ```text
 ping
 ```
 
-Odpowiedź:
+Expected:
 
 ```text
 pong
 ```
 
-Pozostałe wiadomości w M0 są odpowiadane prostym `Odebrałem: ...` — wyłącznie po to, by przetestować transport.
+Health:
 
-## Dane konta Signal
-
-Dane konta są przechowywane w Docker volume `signal-data`:
-
-```yaml
-volumes:
-  - signal-data:/home/.local/share/signal-cli
+```bash
+curl http://127.0.0.1:3010/health
 ```
 
-Restart lub aktualizacja kontenera nie wymaga ponownej rejestracji, o ile volume pozostaje zachowany.
+Logs:
 
-Nie wykonuj bez potrzeby:
+```bash
+docker compose logs -f assistant
+```
+
+## Signal account data
+
+Signal identity/key material lives in the Docker volume:
+
+```yaml
+signal-data:/home/.local/share/signal-cli
+```
+
+Do not run this unless intentionally wiping the bot account state:
 
 ```bash
 docker compose down -v
 ```
 
-`-v` usuwa volume i może usunąć lokalne dane konta Signal, co może wymusić ponowną rejestrację.
+Normal container restarts/rebuilds preserve the volume.
 
-## Security
+## Security boundaries
 
-- konto bota jest osobnym, samodzielnym kontem Signal;
-- wiadomość jest autoryzowana **przed** handlerem aplikacyjnym i przed przyszłą warstwą LLM;
-- po skonfigurowaniu `SIGNAL_OWNER_UUID` autoryzacja preferuje Signal UUID/ACI;
-- numer telefonu jest fallbackiem bootstrapowym i służy jako recipient odpowiedzi;
-- group messages są odrzucane;
-- sync/receipt/typing events nie są traktowane jako polecenia;
-- wiadomości obcych nie otrzymują odpowiedzi;
-- treść obcej wiadomości nie jest logowana;
-- `signal-cli-rest-api` jest dostępne z hosta tylko przez `127.0.0.1`;
-- brak Docker socket, SSH i shell tools;
-- przyszły LLM nie dostanie credentiali Signal ani innych sekretów.
-
-## Endpointy
-
-Assistant health:
-
-```bash
-curl http://127.0.0.1:3000/health
-```
-
-Signal API z hosta:
-
-```text
-http://127.0.0.1:7070
-```
-
-Wewnętrznie kontenery komunikują się przez:
-
-```text
-assistant → http://signal:8080
-```
+- dedicated standalone Signal bot account;
+- direct messages only;
+- owner authorization happens before any LLM request;
+- UUID/ACI is preferred once configured;
+- unauthorized message bodies are not logged;
+- Signal REST API is published on `127.0.0.1` only;
+- assistant HTTP endpoint is published on `127.0.0.1` only;
+- the LLM never receives Signal/API credentials;
+- the LLM interprets requests but cannot directly access shell, SSH, Docker socket, Google credentials, or GitHub credentials;
+- action execution is implemented in application policy/tool layers, not in the prompt.
 
 ## Development
 
 ```bash
 bun install
-bun run dev
 bun test
 bun run typecheck
+bun run dev
 ```
