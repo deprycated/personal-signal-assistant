@@ -8,6 +8,7 @@ describe("OpenRouterIntentClient", () => {
       expect(body.model).toBe("qwen/qwen3.5-flash-02-23");
       expect(body.response_format.json_schema.strict).toBe(true);
       expect(body.provider.require_parameters).toBe(true);
+      expect(body.messages[0].content.toLowerCase()).toContain("json");
 
       return new Response(
         JSON.stringify({
