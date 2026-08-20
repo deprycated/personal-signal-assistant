@@ -26,7 +26,10 @@ describe("OpenRouterAgentClient", () => {
       expect(body.tools[0].function.parameters.$schema).toBeUndefined();
 
       if (calls === 1) {
-        expect(body.messages[0].content).toContain("pendingAction");
+        const system = body.messages[0].content as string;
+        expect(system).toContain("pendingAction");
+        expect(system).toContain("Current local date: 2026-08-20");
+        expect(system).toContain("Current local time: 20:00");
         return Response.json({
           choices: [
             {
