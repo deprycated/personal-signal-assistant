@@ -20,6 +20,20 @@ export const reminders = sqliteTable(
   (table) => [uniqueIndex("reminders_source_key_unique").on(table.sourceKey)],
 );
 
+export const conversationContext = sqliteTable("conversation_context", {
+  ownerKey: text("owner_key").primaryKey(),
+  pendingTool: text("pending_tool"),
+  pendingArgumentsJson: text("pending_arguments_json"),
+  missingInformationJson: text("missing_information_json"),
+  pendingExpiresAtMs: integer("pending_expires_at_ms"),
+  lastEntityType: text("last_entity_type"),
+  lastEntityId: text("last_entity_id"),
+  lastAction: text("last_action"),
+  lastEntityJson: text("last_entity_json"),
+  lastEntityExpiresAtMs: integer("last_entity_expires_at_ms"),
+  updatedAtMs: integer("updated_at_ms").notNull(),
+});
+
 export const auditLog = sqliteTable("audit_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   eventType: text("event_type").notNull(),

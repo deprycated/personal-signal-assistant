@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import * as schema from "./schema";
 
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 export function createDatabase(path: string) {
   const sqlite = new Database(path, { create: true, strict: true });
@@ -48,6 +48,29 @@ export function createDatabase(path: string) {
         CREATE INDEX audit_log_created_idx ON audit_log(created_at_ms);
 
         PRAGMA user_version = 1;
+      `);
+    });
+    migrate();
+  }
+
+  const afterV1 = sqlite.query("PRAGMA user_version").get() as { user_version: number };
+  if (afterV1.user_version < 2) {
+    const migrate = sqlite.transaction(() => {
+      sqlite.exec(`
+        CREATE TABLE conversation_context (
+          owner_key TEXT PRIMARY KEY NOT NULL,
+          pending_tool TEXT,
+          pending_arguments_json TEXT,
+          missing_information_json TEXT,
+          pending_expires_at_ms INTEGER,
+          last_entity_type TEXT,
+          last_entity_id TEXT,
+          last_action TEXT,
+          last_entity_json TEXT,
+          last_entity_expires_at_ms INTEGER,
+          updated_at_ms INTEGER NOT NULL
+        );
+        PRAGMA user_version = 2;
       `);
     });
     migrate();

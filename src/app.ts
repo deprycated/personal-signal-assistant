@@ -1,14 +1,16 @@
-import type { IncomingDirectMessage } from "./signal/types";
-import { SignalClient } from "./signal/client";
+import { OpenRouterAgentClient } from "./ai/agent";
+import type { ConversationContextRepository } from "./context/repository";
 import { logger } from "./logger";
-import { OpenRouterIntentClient } from "./ai/openrouter";
-import { renderIntentResponse } from "./ai/respond";
+import { SignalClient } from "./signal/client";
+import type { IncomingDirectMessage } from "./signal/types";
 
 export class AssistantApp {
   constructor(
     private readonly signal: SignalClient,
-    private readonly intentClient: OpenRouterIntentClient,
+    private readonly agent: OpenRouterAgentClient,
+    private readonly contexts: ConversationContextRepository,
     private readonly ownerNumber: string,
+    private readonly ownerKey: string,
   ) {}
 
   async handleMessage(message: IncomingDirectMessage): Promise<void> {
@@ -25,20 +27,28 @@ export class AssistantApp {
     }
 
     try {
-      const result = await this.intentClient.interpret(message.text);
-      logger.info("Signal message interpreted", {
-        intent: result.intent,
-        confidence: result.confidence,
-        missingInformationCount: result.missingInformation.length,
+      const conversation = this.contexts.get(this.ownerKey);
+      const sourceMessageKey = message.timestamp
+        ? `signal:${message.timestamp}`
+        : `signal:${crypto.randomUUID()}`;
+      const response = await this.agent.respond({
+        text: message.text,
+        ownerKey: this.ownerKey,
+        sourceMessageKey,
+        conversation,
       });
-      await this.signal.sendMessage(this.ownerNumber, renderIntentResponse(result));
+      logger.info("Authorized Signal message handled", {
+        hadPendingAction: Boolean(conversation.pendingAction),
+        hadRecentEntity: Boolean(conversation.lastEntity),
+      });
+      await this.signal.sendMessage(this.ownerNumber, response);
     } catch (error) {
-      logger.error("Failed to interpret authorized Signal message", {
+      logger.error("Failed to handle authorized Signal message", {
         error: error instanceof Error ? error.message : String(error),
       });
       await this.signal.sendMessage(
         this.ownerNumber,
-        "Nie udało mi się teraz zinterpretować wiadomości. Spróbuj ponownie za chwilę.",
+        "Nie udało mi się teraz obsłużyć wiadomości. Spróbuj ponownie za chwilę.",
       );
     }
   }

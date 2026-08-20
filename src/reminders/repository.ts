@@ -1,4 +1,4 @@
-import { and, asc, eq, lte } from "drizzle-orm";
+import { and, asc, eq, gte, lt, lte } from "drizzle-orm";
 import type { AppDatabase } from "../db/database";
 import { auditLog, reminders, type ReminderRow } from "../db/schema";
 
@@ -37,9 +37,7 @@ export class ReminderRepository {
     if (!created) throw new Error("Failed to create reminder");
 
     if (created.id === id) {
-      this.audit("reminder.created", created.id, {
-        scheduledAtMs: created.scheduledAtMs,
-      });
+      this.audit("reminder.created", created.id, { scheduledAtMs: created.scheduledAtMs });
     }
     return created;
   }
@@ -58,10 +56,20 @@ export class ReminderRepository {
   }
 
   listUpcoming(nowMs = Date.now(), limit = 20): ReminderRow[] {
+    return this.listBetween(nowMs, nowMs + 30 * 86_400_000, limit);
+  }
+
+  listBetween(startMs: number, endMs: number, limit = 20): ReminderRow[] {
     return this.database.db
       .select()
       .from(reminders)
-      .where(and(eq(reminders.status, "pending"), lte(reminders.scheduledAtMs, nowMs + 30 * 86_400_000)))
+      .where(
+        and(
+          eq(reminders.status, "pending"),
+          gte(reminders.scheduledAtMs, startMs),
+          lt(reminders.scheduledAtMs, endMs),
+        ),
+      )
       .orderBy(asc(reminders.scheduledAtMs))
       .limit(limit)
       .all();
