@@ -76,9 +76,15 @@ SIGNAL_BOT_NUMBER=+48...
 SIGNAL_OWNER_NUMBER=+48...
 ```
 
-### 1. Sparowanie konta Signal
+`SIGNAL_BOT_NUMBER` to osobny numer przeznaczony dla bota. Konto bota jest rejestrowane bezpośrednio przez `signal-cli`; nie trzeba logować tego numeru w aplikacji Signal na drugim telefonie ani linkować go jako dodatkowego urządzenia.
 
-Na czas pierwszego linkowania ustaw:
+`SIGNAL_OWNER_NUMBER` to Twój prywatny numer Signal, z którego będziesz pisać do asystenta.
+
+## Rejestracja osobnego konta Signal bez drugiego urządzenia
+
+### 1. Uruchom tylko serwis Signal
+
+Na czas rejestracji ustaw:
 
 ```dotenv
 SIGNAL_MODE=native
@@ -90,25 +96,113 @@ Uruchom:
 docker compose up -d signal
 ```
 
-Otwórz na maszynie z Dockerem:
+API jest dostępne lokalnie pod:
 
 ```text
-http://127.0.0.1:8080/v1/qrcodelink?device_name=personal-assistant
+http://127.0.0.1:8080
 ```
 
-W Signal: **Settings → Linked devices → +** i zeskanuj kod QR.
+### 2. Rozpocznij rejestrację numeru bota
 
-Dane Signal są zachowywane w volume `signal-data`.
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  "http://127.0.0.1:8080/v1/register/+48NUMER_BOTA"
+```
 
-### 2. Tryb roboczy
+Signal zwykle wymaga CAPTCHA i może zwrócić:
 
-Po sparowaniu zmień:
+```json
+{
+  "error": "Captcha required for verification..."
+}
+```
+
+### 3. Wygeneruj CAPTCHA
+
+Otwórz:
+
+```text
+https://signalcaptchas.org/registration/generate.html
+```
+
+Rozwiąż CAPTCHA, następnie skopiuj adres linku **Open Signal**.
+
+Link wygląda mniej więcej tak:
+
+```text
+signalcaptcha://signal-hcaptcha....
+```
+
+Dla REST API przekaż wartość bez prefiksu `signalcaptcha://`, czyli zaczynając od:
+
+```text
+signal-hcaptcha....
+```
+
+Najwygodniej zapisać ją do zmiennej:
+
+```bash
+CAPTCHA='signal-hcaptcha....'
+```
+
+Następnie:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  --data "$(jq -nc --arg captcha "$CAPTCHA" '{captcha:$captcha,use_voice:false}')" \
+  "http://127.0.0.1:8080/v1/register/+48NUMER_BOTA"
+```
+
+Używaj świeżo wygenerowanej CAPTCHA i nie wykonuj wielu prób rejestracji jedna po drugiej — Signal stosuje rate limiting.
+
+### 4. Zweryfikuj kod SMS
+
+Po otrzymaniu kodu, np. `123-456`:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  "http://127.0.0.1:8080/v1/register/+48NUMER_BOTA/verify/123-456"
+```
+
+Po poprawnej weryfikacji konto bota jest samodzielnym kontem Signal obsługiwanym przez `signal-cli`.
+
+### 5. Sprawdź zarejestrowane konto
+
+```bash
+curl http://127.0.0.1:8080/v1/accounts
+```
+
+Na liście powinien pojawić się `SIGNAL_BOT_NUMBER`.
+
+### 6. Przetestuj wysyłkę z bota
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Test asystenta",
+    "number": "+48NUMER_BOTA",
+    "recipients": ["+48TWOJ_NUMER"]
+  }' \
+  "http://127.0.0.1:8080/v2/send"
+```
+
+### 7. Przełącz Signal w tryb roboczy
+
+Po rejestracji ustaw:
 
 ```dotenv
 SIGNAL_MODE=json-rpc-native
 ```
 
-Jeśli platforma nie wspiera tego trybu, użyj `json-rpc`.
+Jeśli platforma nie wspiera tego trybu, użyj:
+
+```dotenv
+SIGNAL_MODE=json-rpc
+```
 
 Uruchom cały stack:
 
@@ -122,9 +216,33 @@ Logi:
 docker compose logs -f assistant
 ```
 
-### 3. Test round-trip
+## Ustalenie UUID właściciela
 
-Wyślij z numeru właściciela do bota:
+Wiadomości Signal mogą przychodzić jako sealed sender, bez numeru telefonu w envelope. W takim przypadku identyfikatorem nadawcy jest Signal UUID/ACI.
+
+Po pierwszej wiadomości od właściciela możesz zobaczyć w logu identyfikator w rodzaju:
+
+```text
+senderUuid=ff603517-3b21-4274-b31b-b0714a6f5a5f
+```
+
+Jeśli potwierdziłeś, że wiadomość została wysłana z Twojego prywatnego konta Signal, ustaw:
+
+```dotenv
+SIGNAL_OWNER_UUID=ff603517-3b21-4274-b31b-b0714a6f5a5f
+```
+
+Następnie przebuduj serwis:
+
+```bash
+docker compose up -d --build assistant
+```
+
+Po skonfigurowaniu UUID jest on preferowanym identyfikatorem właściciela. Numer telefonu pozostaje przydatny do bootstrapu i jako docelowy recipient odpowiedzi.
+
+## Test round-trip
+
+Wyślij ze swojego prywatnego konta Signal do numeru bota:
 
 ```text
 ping
@@ -138,16 +256,37 @@ pong
 
 Pozostałe wiadomości w M0 są odpowiadane prostym `Odebrałem: ...` — wyłącznie po to, by przetestować transport.
 
+## Dane konta Signal
+
+Dane konta są przechowywane w Docker volume `signal-data`:
+
+```yaml
+volumes:
+  - signal-data:/home/.local/share/signal-cli
+```
+
+Restart lub aktualizacja kontenera nie wymaga ponownej rejestracji, o ile volume pozostaje zachowany.
+
+Nie wykonuj bez potrzeby:
+
+```bash
+docker compose down -v
+```
+
+`-v` usuwa volume i może usunąć lokalne dane konta Signal, co może wymusić ponowną rejestrację.
+
 ## Security
 
-- `SIGNAL_OWNER_NUMBER` jest sprawdzany **przed** handlerem aplikacyjnym.
-- Po poznaniu UUID właściciela ustaw też `SIGNAL_OWNER_UUID`; wtedy wymagany jest jednocześnie właściwy numer i UUID.
-- group messages są odrzucane.
-- sync/receipt/typing events nie są traktowane jako polecenia.
-- wiadomości obcych nie otrzymują odpowiedzi.
-- treść obcej wiadomości nie jest logowana.
-- `signal-cli-rest-api` jest dostępne z hosta tylko przez `127.0.0.1`.
-- brak Docker socket, SSH i shell tools.
+- konto bota jest osobnym, samodzielnym kontem Signal;
+- wiadomość jest autoryzowana **przed** handlerem aplikacyjnym i przed przyszłą warstwą LLM;
+- po skonfigurowaniu `SIGNAL_OWNER_UUID` autoryzacja preferuje Signal UUID/ACI;
+- numer telefonu jest fallbackiem bootstrapowym i służy jako recipient odpowiedzi;
+- group messages są odrzucane;
+- sync/receipt/typing events nie są traktowane jako polecenia;
+- wiadomości obcych nie otrzymują odpowiedzi;
+- treść obcej wiadomości nie jest logowana;
+- `signal-cli-rest-api` jest dostępne z hosta tylko przez `127.0.0.1`;
+- brak Docker socket, SSH i shell tools;
 - przyszły LLM nie dostanie credentiali Signal ani innych sekretów.
 
 ## Endpointy
