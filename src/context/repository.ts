@@ -1,6 +1,10 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lt } from "drizzle-orm";
 import type { AppDatabase } from "../db/database";
-import { conversationContext } from "../db/schema";
+import { conversationContext, conversationTurns, type ConversationTurnRole } from "../db/schema";
+
+export const RECENT_TURN_LIMIT = 8;
+export const RECENT_TURN_TTL_MS = 24 * 60 * 60_000;
+const MAX_TURN_CONTENT_LENGTH = 4_000;
 
 export type PendingAction = {
   tool: string;
@@ -15,9 +19,16 @@ export type RecentEntity = {
   data: Record<string, unknown>;
 };
 
+export type ConversationTurn = {
+  role: ConversationTurnRole;
+  content: string;
+  createdAtMs: number;
+};
+
 export type ConversationSnapshot = {
   pendingAction?: PendingAction;
   lastEntity?: RecentEntity;
+  recentTurns?: ConversationTurn[];
 };
 
 function parseObject(value: string | null): Record<string, unknown> {
@@ -42,6 +53,10 @@ function parseStringArray(value: string | null): string[] {
   }
 }
 
+function boundedContent(content: string): string {
+  return content.trim().slice(0, MAX_TURN_CONTENT_LENGTH);
+}
+
 export class ConversationContextRepository {
   constructor(private readonly database: AppDatabase) {}
 
@@ -52,10 +67,9 @@ export class ConversationContextRepository {
       .where(eq(conversationContext.ownerKey, ownerKey))
       .limit(1)
       .get();
-    if (!row) return {};
 
     const snapshot: ConversationSnapshot = {};
-    if (row.pendingTool && row.pendingExpiresAtMs && row.pendingExpiresAtMs > nowMs) {
+    if (row?.pendingTool && row.pendingExpiresAtMs && row.pendingExpiresAtMs > nowMs) {
       snapshot.pendingAction = {
         tool: row.pendingTool,
         arguments: parseObject(row.pendingArgumentsJson),
@@ -64,7 +78,7 @@ export class ConversationContextRepository {
     }
 
     if (
-      row.lastEntityType &&
+      row?.lastEntityType &&
       row.lastEntityId &&
       row.lastAction &&
       row.lastEntityExpiresAtMs &&
@@ -78,7 +92,74 @@ export class ConversationContextRepository {
       };
     }
 
+    const recentTurns = this.database.db
+      .select({
+        id: conversationTurns.id,
+        role: conversationTurns.role,
+        content: conversationTurns.content,
+        createdAtMs: conversationTurns.createdAtMs,
+      })
+      .from(conversationTurns)
+      .where(
+        and(
+          eq(conversationTurns.ownerKey, ownerKey),
+          gte(conversationTurns.createdAtMs, nowMs - RECENT_TURN_TTL_MS),
+        ),
+      )
+      .orderBy(desc(conversationTurns.createdAtMs), desc(conversationTurns.id))
+      .limit(RECENT_TURN_LIMIT)
+      .all()
+      .reverse()
+      .map(({ role, content, createdAtMs }) => ({ role, content, createdAtMs }));
+
+    if (recentTurns.length > 0) snapshot.recentTurns = recentTurns;
     return snapshot;
+  }
+
+  appendExchange(
+    ownerKey: string,
+    userContent: string,
+    assistantContent: string,
+    nowMs = Date.now(),
+  ): void {
+    const user = boundedContent(userContent);
+    const assistant = boundedContent(assistantContent);
+    if (!user || !assistant) return;
+
+    const commit = this.database.sqlite.transaction(() => {
+      this.database.db
+        .insert(conversationTurns)
+        .values({ ownerKey, role: "user", content: user, createdAtMs: nowMs })
+        .run();
+      this.database.db
+        .insert(conversationTurns)
+        .values({ ownerKey, role: "assistant", content: assistant, createdAtMs: nowMs + 1 })
+        .run();
+
+      this.database.db
+        .delete(conversationTurns)
+        .where(
+          and(
+            eq(conversationTurns.ownerKey, ownerKey),
+            lt(conversationTurns.createdAtMs, nowMs - RECENT_TURN_TTL_MS),
+          ),
+        )
+        .run();
+
+      const overflow = this.database.db
+        .select({ id: conversationTurns.id })
+        .from(conversationTurns)
+        .where(eq(conversationTurns.ownerKey, ownerKey))
+        .orderBy(desc(conversationTurns.createdAtMs), desc(conversationTurns.id))
+        .all()
+        .slice(RECENT_TURN_LIMIT)
+        .map((row) => row.id);
+
+      if (overflow.length > 0) {
+        this.database.db.delete(conversationTurns).where(inArray(conversationTurns.id, overflow)).run();
+      }
+    });
+    commit();
   }
 
   setPending(
