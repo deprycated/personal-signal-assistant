@@ -15,7 +15,7 @@ Natural-language personal assistant available only through Signal. No commands, 
 7. **Small blast radius** — one owner, direct messages only, minimal external scopes, no shell/SSH/Docker socket.
 8. **Capture before organization** — ideas are not automatically tasks or projects.
 9. **SQLite for operational state; Markdown/Git for durable knowledge.**
-10. **Bounded conversation context** — persist only the pending action and short recent-entity context needed for natural follow-ups.
+10. **Simple conversational context** — send the active conversation history to the model; a new conversation starts after 24 hours of inactivity. Tool calls and tool results are part of that history.
 
 ## Milestones
 
@@ -44,14 +44,17 @@ SQLite + Drizzle + bounded native tool calling + scheduler.
 Acceptance:
 - model has narrow tools, never generic SQL/database access;
 - tool arguments are Zod-validated and policy-authorized;
-- incomplete requests persist a small pending context;
-- `Dentysta jutro o` → question for time, then `13` completes the same reminder;
-- `a jednak 16:30` updates the recent pending reminder without requiring an internal id from the user;
+- the complete active conversation is available to the model, including assistant replies, tool calls and tool results;
+- more than 24 hours of inactivity starts a fresh conversation context;
+- context sent to the model is capped to the most recent 100 messages;
+- `Lekarz jutro o` → question for time, then `13` continues the same conversation naturally;
+- `a jednak 16:30` can update a reminder using the real id from prior tool history rather than an application-side pending-action state machine;
 - reminders survive restart;
+- event time and notification time are distinct; event reminders default to 30 minutes before;
 - duplicate processing of the same Signal message/tool index does not create a duplicate reminder;
 - failed delivery is retried with bounded exponential backoff;
 - stale delivery claims are recovered after restart;
-- audit trail contains decisions/IDs/timestamps, not message bodies or secrets;
+- audit trail contains decisions/IDs/timestamps, not secrets;
 - the external Signal boundary is documented as not strictly exactly-once across a crash between remote send and local commit.
 
 ### M3 — Notes and recall
