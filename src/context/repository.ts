@@ -89,6 +89,15 @@ export class ConversationHistoryRepository {
     if (messages.length === 0) return;
 
     const commit = this.database.sqlite.transaction(() => {
+      const latest = this.database.db
+        .select({ createdAtMs: conversationTurns.createdAtMs })
+        .from(conversationTurns)
+        .where(eq(conversationTurns.ownerKey, ownerKey))
+        .orderBy(desc(conversationTurns.createdAtMs), desc(conversationTurns.id))
+        .limit(1)
+        .get();
+      const baseCreatedAtMs = Math.max(nowMs, (latest?.createdAtMs ?? nowMs - 1) + 1);
+
       messages.forEach((message, index) => {
         this.database.db
           .insert(conversationTurns)
@@ -97,7 +106,7 @@ export class ConversationHistoryRepository {
             role: message.role,
             content: legacyContent(message),
             messageJson: JSON.stringify(message),
-            createdAtMs: nowMs + index,
+            createdAtMs: baseCreatedAtMs + index,
           })
           .run();
       });
