@@ -10,6 +10,7 @@ Natural language first; no required commands, prefixes, or special syntax.
 - **KISS** — prefer the simplest solution that correctly solves the current problem. Avoid speculative abstractions, infrastructure, and premature generalization.
 - **SOLID** — keep responsibilities clear, dependencies explicit, interfaces narrow, and behavior replaceable/testable. Apply SOLID pragmatically; do not add layers only to satisfy a pattern.
 - **TDD** — for behavior changes: write or update a failing test first, implement the smallest change that makes it pass, then refactor while keeping tests green.
+- **Plan before implementation** — prepare a concise implementation plan first, then stop and wait for comments/review. Proceed with implementation only after explicit confirmation.
 
 ## Architecture rules
 
