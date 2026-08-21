@@ -10,6 +10,7 @@ ENV NODE_ENV=production
 COPY --from=install /app/node_modules ./node_modules
 COPY package.json tsconfig.json ./
 COPY src ./src
+RUN mkdir -p /data && chown bun:bun /data
 USER bun
 EXPOSE 3000
 CMD ["bun", "run", "src/index.ts"]

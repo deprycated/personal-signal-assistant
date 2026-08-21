@@ -1,49 +1,179 @@
 # Personal Signal Assistant — MVP
 
-Self-hosted personal assistant with Signal as the only user interface.
+Self-hosted personal assistant with Signal as the only user interface. Natural language is the primary UX: no slash commands, prefixes or special syntax are required.
 
-Current vertical slice:
+## Current architecture
 
-**Signal → owner auth gate → OpenRouter structured intent → safe response → Signal**
+```text
+Signal
+  ↓
+owner auth gate
+  ↓
+load active conversation history
+  ↓
+OpenRouter / DeepSeek
+  ↓ native tool calls
+ToolRegistry → default-deny Policy → Zod → domain services
+                                         ↓
+                                  SQLite / Drizzle
+                                         ↓
+                              ReminderScheduler → Signal
+```
 
-The assistant is natural-language-first: no slash commands, prefixes, or special syntax are required.
+The model never receives generic SQL/database access.
 
 ## Status
 
 ### M0 — Signal transport
 
-- [x] Docker Compose
-- [x] `signal-cli-rest-api`
+- [x] Docker Compose + `signal-cli-rest-api`
 - [x] Bun + TypeScript
 - [x] WebSocket receive loop with reconnect/backoff
 - [x] owner allowlist before application/LLM handling
 - [x] Signal UUID/ACI support for sealed sender
 - [x] group rejection
-- [x] ignore sync/receipt/typing events
 - [x] Signal replies through `/v2/send`
 - [x] localhost-only published ports
-- [x] parser/auth tests
 
-### M1 — OpenRouter / natural language
+### M1 — natural-language interpretation
 
-- [x] OpenRouter client
-- [x] strict JSON Schema structured output
-- [x] Zod runtime validation
-- [x] intents: `reply`, `create_note`, `search_notes`, `create_reminder`, `update_reminder`, `calendar_query`, `calendar_create`, `checkpoint_save`, `checkpoint_resume`, `plan_now`, `ambiguous`
-- [x] confidence + missing-information handling
+- [x] OpenRouter integration
 - [x] natural Polish input including typos and abbreviations
-- [x] deterministic policy boundary: the model interprets but does not execute actions
-- [ ] persisted conversational follow-up context (`a jednak 16:30`) — M2
+- [x] Zod runtime validation
+- [x] bounded model execution
 
-Action intents are currently recognized but not executed. Persistence/reminders arrive in M2.
+### M2 — tools, conversation history, SQLite and reminders
 
-Default model:
+- [x] native OpenRouter `tools` / `tool_calls`
+- [x] explicit `ToolRegistry` and default-deny policy
+- [x] SQLite + Drizzle operational state
+- [x] rolling conversation history with 24h inactivity boundary
+- [x] persisted `user`, `assistant`, assistant `tool_calls` and `tool` result messages
+- [x] context capped to the most recent 100 messages
+- [x] reminder create/update/list tools
+- [x] separate event time and notification time
+- [x] event reminders default to 30 minutes before
+- [x] deterministic `rano` / `po południu` / `wieczorem` handling
+- [x] scheduler with retry/backoff and stale-claim recovery
+- [x] idempotent reminder creation for repeated Signal message/tool call
+
+Next: notes/recall, Google Calendar, checkpoint/resume and `co teraz?`.
+
+## Conversation context
+
+Context is deliberately simple. Each successful exchange is stored as the same message shapes OpenRouter uses:
 
 ```text
-qwen/qwen3.5-flash-02-23
+user
+assistant
+assistant tool_calls
+optional tool results
+assistant
 ```
 
-Override it with `OPENROUTER_MODEL`.
+For every new Signal message, the assistant sends the current conversation history before the new message.
+
+A conversation remains active while messages are less than **24 hours apart**. If more than 24 hours passed since the last activity, previous messages are not sent to the model and the next message starts a fresh context.
+
+Only the most recent **100 messages** can be sent as context. Stored rows older than 30 days are pruned. There is no application-side `pendingAction`, slot state machine or recent-entity context.
+
+Example:
+
+```text
+You: Lekarz jutro o
+Bot: O której godzinie masz wizytę?
+
+You: 13
+Bot: Gotowe. Lekarz jutro o 13:00. Przypomnę o 12:30.
+```
+
+The second message works because the model receives the previous user message and assistant question. If the first turn used a tool, its exact tool call and result are also present in history.
+
+## Reminder semantics
+
+Two times are modeled separately:
+
+```text
+eventAt       when the appointment/event occurs
+scheduledAt   when Signal sends the notification
+```
+
+For an event:
+
+```text
+Dentysta w czwartek o 13
+```
+
+defaults to:
+
+```text
+event:        Thursday 13:00
+notification: Thursday 12:30
+```
+
+Explicit notification timing overrides the default:
+
+```text
+Dentysta w czwartek o 13. Przypomnij mi rano.
+```
+
+becomes event 13:00 and notification 08:00 that day.
+
+Deterministic dayparts:
+
+```text
+rano          → 08:00
+po południu   → 15:00
+wieczorem     → 19:00
+```
+
+A standalone reminder is different:
+
+```text
+Przypomnij mi jutro o 13 zadzwonić do lekarza
+```
+
+Here 13:00 is the notification itself; there is no separate event time.
+
+## Tool boundary
+
+Currently allowed:
+
+```text
+reminder_schedule
+reminder_update
+reminder_list
+```
+
+Execution path:
+
+```text
+model proposes tool call
+        ↓
+ToolRegistry validates name
+        ↓
+Policy checks capability
+        ↓
+Zod validates arguments
+        ↓
+domain repository/service
+        ↓
+SQLite
+```
+
+There is no generic SQL tool, reminder delete, shell, SSH, filesystem, Docker socket or arbitrary HTTP tool.
+
+The OpenRouter loop is capped at four model rounds per Signal message.
+
+## Model
+
+Default:
+
+```text
+deepseek/deepseek-v4-flash-0731
+```
+
+Override with `OPENROUTER_MODEL`.
 
 ## Environment
 
@@ -62,38 +192,34 @@ SIGNAL_OWNER_NUMBER=+48...
 SIGNAL_OWNER_UUID=
 
 OPENROUTER_API_KEY=sk-or-v1-...
-OPENROUTER_MODEL=qwen/qwen3.5-flash-02-23
+OPENROUTER_MODEL=deepseek/deepseek-v4-flash-0731
 ASSISTANT_TIMEZONE=Europe/Warsaw
+
+DB_PATH=./data/assistant.sqlite
+REMINDER_POLL_MS=15000
 ```
 
-`SIGNAL_OWNER_UUID` is optional during bootstrap, but recommended after the first inbound message from the owner.
+In Docker, SQLite is stored at `/data/assistant.sqlite` in the persistent `assistant-data` volume.
 
 ## Ports
-
-`signal-cli-rest-api` listens inside its container on port `8080`. The host port is intentionally different:
 
 ```text
 Raspberry Pi / host                 Docker network
 127.0.0.1:7070  ───────────────▶  signal:8080
 127.0.0.1:3010  ───────────────▶  assistant:3000
-                                      ▲
-                                      │
-                                 Bun assistant
 ```
 
-Container-to-container communication uses:
+Container-to-container Signal access:
 
 ```text
 assistant → http://signal:8080
 ```
 
-Changing `SIGNAL_HTTP_PORT` or `ASSISTANT_HTTP_PORT` changes only the host-side port.
+## Register the dedicated Signal bot account
 
-## Register a dedicated Signal bot account without a second device
+The bot uses its own phone number and is registered directly through `signal-cli`; it is not linked to the owner's Signal account.
 
-The bot uses its own phone number and is registered directly through `signal-cli`; it is not linked to the owner's Signal account and does not require Signal to be logged in on another phone.
-
-### 1. Start Signal in registration mode
+### 1. Registration mode
 
 Set:
 
@@ -101,7 +227,7 @@ Set:
 SIGNAL_MODE=native
 ```
 
-Then:
+Start Signal:
 
 ```bash
 docker compose up -d signal
@@ -116,23 +242,13 @@ curl -X POST \
   "http://127.0.0.1:7070/v1/register/+48BOT_NUMBER"
 ```
 
-Signal will normally ask for a CAPTCHA.
-
-### 3. Solve CAPTCHA
-
-Open:
+If CAPTCHA is requested, open:
 
 ```text
 https://signalcaptchas.org/registration/generate.html
 ```
 
-Solve the CAPTCHA and copy the **Open Signal** link. It looks like:
-
-```text
-signalcaptcha://signal-hcaptcha....
-```
-
-For this REST registration request, paste the value beginning with `signal-hcaptcha.` directly into the JSON body; no shell variable or `jq` is required:
+Copy the fresh value beginning with `signal-hcaptcha.` and submit it directly:
 
 ```bash
 curl -X POST \
@@ -144,11 +260,7 @@ curl -X POST \
   "http://127.0.0.1:7070/v1/register/+48BOT_NUMBER"
 ```
 
-Use a fresh CAPTCHA and avoid repeated rapid registration attempts because Signal rate-limits registration.
-
-### 4. Verify SMS code
-
-For a code such as `123-456`:
+### 3. Verify SMS code
 
 ```bash
 curl -X POST \
@@ -156,105 +268,50 @@ curl -X POST \
   "http://127.0.0.1:7070/v1/register/+48BOT_NUMBER/verify/123-456"
 ```
 
-Verify the account:
-
-```bash
-curl http://127.0.0.1:7070/v1/accounts
-```
-
-### 5. Test direct sending
-
-```bash
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": "Test asystenta",
-    "number": "+48BOT_NUMBER",
-    "recipients": ["+48OWNER_NUMBER"]
-  }' \
-  "http://127.0.0.1:7070/v2/send"
-```
-
-### 6. Switch to runtime mode
+Then switch runtime mode back to:
 
 ```dotenv
 SIGNAL_MODE=json-rpc-native
 ```
 
-Fallback if unsupported by the platform:
+Fallback:
 
 ```dotenv
 SIGNAL_MODE=json-rpc
 ```
 
-Then start the whole stack:
-
-```bash
-docker compose up -d --build
-```
-
 ## Owner UUID / sealed sender
 
-Signal can deliver sealed-sender messages without a phone number in the envelope. In that case the stable sender identifier is UUID/ACI.
-
-After a known message from the owner, logs may contain:
-
-```text
-senderUuid=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-```
-
-Set that exact value:
+Signal sealed-sender messages may identify the sender by UUID/ACI rather than phone number. After receiving a known owner message, set the logged UUID:
 
 ```dotenv
 SIGNAL_OWNER_UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
-Once configured, UUID is the preferred authorization identity. `SIGNAL_OWNER_NUMBER` remains the bootstrap fallback and the explicit recipient for replies.
+UUID is then the preferred authorization identity. `SIGNAL_OWNER_NUMBER` remains the explicit reply recipient.
 
-## OpenRouter intent layer
+## Reminder persistence and delivery
 
-Authorized non-`ping` messages are sent to OpenRouter only after the Signal auth gate succeeds.
+Operational state survives rebuilds through:
 
-The model returns a strict structured object containing:
-
-- one allowed intent;
-- confidence from `0` to `1`;
-- a short optional reply;
-- missing information;
-- normalized action arguments.
-
-The result is validated again with Zod before application code accepts it. The LLM does **not** execute actions directly.
-
-Examples the intent layer is expected to understand:
-
-```text
-jtro 17 dentsta
-jutro koło 17 dentysta
-dentysta jutro 17
+```yaml
+assistant-data:/data
 ```
 
-If required information is absent:
+Delivery uses `claim → send → mark-sent`. Failed sends are retried with bounded exponential backoff, and stale `sending` claims are recovered after restart.
 
-```text
-dentysta jutro
-```
+Strict exactly-once delivery cannot be guaranteed across a crash exactly between external Signal send success and the local SQLite commit. At that narrow boundary a duplicate is preferable to silently losing a reminder.
 
-it should ask one short clarification question rather than inventing a time.
+## Updating on Raspberry Pi
 
-At M1, action intents are intentionally not persisted or executed. M2 introduces SQLite, conversation context and reminders.
-
-## Smoke tests
-
-Transport:
-
-```text
-ping
-```
-
-Expected:
-
-```text
-pong
+```bash
+git pull
+bun install
+bun test
+bun run typecheck
+docker compose build assistant
+docker compose up -d
+docker compose logs -f assistant
 ```
 
 Health:
@@ -263,40 +320,32 @@ Health:
 curl http://127.0.0.1:3010/health
 ```
 
-Logs:
+The Signal image does not need to be rebuilt for assistant code changes.
 
-```bash
-docker compose logs -f assistant
-```
-
-## Signal account data
-
-Signal identity/key material lives in the Docker volume:
+## Persistent data
 
 ```yaml
 signal-data:/home/.local/share/signal-cli
+assistant-data:/data
 ```
 
-Do not run this unless intentionally wiping the bot account state:
+Do not run this unless intentionally wiping both Signal identity and assistant state:
 
 ```bash
 docker compose down -v
 ```
 
-Normal container restarts/rebuilds preserve the volume.
-
 ## Security boundaries
 
 - dedicated standalone Signal bot account;
 - direct messages only;
-- owner authorization happens before any LLM request;
-- UUID/ACI is preferred once configured;
+- owner authorization before any LLM request;
+- UUID/ACI preferred once configured;
 - unauthorized message bodies are not logged;
-- Signal REST API is published on `127.0.0.1` only;
-- assistant HTTP endpoint is published on `127.0.0.1` only;
-- the LLM never receives Signal/API credentials;
-- the LLM interprets requests but cannot directly access shell, SSH, Docker socket, Google credentials, or GitHub credentials;
-- action execution is implemented in application policy/tool layers, not in the prompt.
+- localhost-only published APIs;
+- OpenRouter receives conversational data, never Signal/API credentials;
+- default-deny tool policy independent from the prompt;
+- no generic SQL/database, destructive reminder, shell, SSH, Docker, filesystem, GitHub or Google credential tool.
 
 ## Development
 
@@ -306,3 +355,5 @@ bun test
 bun run typecheck
 bun run dev
 ```
+
+Local state defaults to `./data/assistant.sqlite`; `data/` is gitignored.

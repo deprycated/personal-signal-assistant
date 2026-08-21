@@ -7,6 +7,8 @@ export type AppConfig = {
   openRouterApiKey: string;
   openRouterModel: string;
   assistantTimezone: string;
+  dbPath: string;
+  reminderPollMs: number;
 };
 
 function required(name: string): string {
@@ -20,11 +22,18 @@ function optional(name: string): string | undefined {
   return value || undefined;
 }
 
-export function loadConfig(): AppConfig {
-  const port = Number(Bun.env.PORT ?? "3000");
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid PORT: ${Bun.env.PORT}`);
+function positiveInteger(name: string, fallback: number): number {
+  const raw = Bun.env[name]?.trim();
+  const value = raw ? Number(raw) : fallback;
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`Invalid ${name}: ${raw}`);
   }
+  return value;
+}
+
+export function loadConfig(): AppConfig {
+  const port = positiveInteger("PORT", 3000);
+  if (port > 65535) throw new Error(`Invalid PORT: ${port}`);
 
   return {
     port,
@@ -33,7 +42,9 @@ export function loadConfig(): AppConfig {
     signalOwnerNumber: required("SIGNAL_OWNER_NUMBER"),
     signalOwnerUuid: optional("SIGNAL_OWNER_UUID"),
     openRouterApiKey: required("OPENROUTER_API_KEY"),
-    openRouterModel: optional("OPENROUTER_MODEL") ?? "qwen/qwen3.5-flash-02-23",
+    openRouterModel: optional("OPENROUTER_MODEL") ?? "deepseek/deepseek-v4-flash-0731",
     assistantTimezone: optional("ASSISTANT_TIMEZONE") ?? "Europe/Warsaw",
+    dbPath: optional("DB_PATH") ?? "./data/assistant.sqlite",
+    reminderPollMs: positiveInteger("REMINDER_POLL_MS", 15_000),
   };
 }
