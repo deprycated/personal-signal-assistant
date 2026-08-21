@@ -1,5 +1,4 @@
 import { z } from "zod";
-import type { ConversationContextRepository } from "../context/repository";
 import type { ReminderRepository } from "../reminders/repository";
 import { addCalendarDays, localDateTimeAt, resolveLocalDateTime } from "../time/zoned";
 import type { ToolRegistration } from "./registry";
@@ -35,7 +34,7 @@ const scheduleSchema = z
 
 const updateSchema = z
   .object({
-    reminderId: z.string().uuid().nullable(),
+    reminderId: z.string().uuid(),
     kind: reminderKindSchema.nullable(),
     eventDate: dateSchema.nullable(),
     eventTime: timeSchema.nullable(),
@@ -189,6 +188,47 @@ function resolveTiming(input: TimingInput, timezone: string): TimingResolution {
   };
 }
 
+function currentTiming(
+  reminder: { eventAtMs: number | null; scheduledAtMs: number; leadMinutes: number | null },
+  timezone: string,
+): TimingInput {
+  const notification = localDateTimeAt(reminder.scheduledAtMs, timezone);
+  if (reminder.eventAtMs === null) {
+    return {
+      kind: "standalone",
+      eventDate: null,
+      eventTime: null,
+      reminderDate: notification.date,
+      reminderTime: notification.time,
+      reminderDaypart: null,
+      minutesBefore: null,
+    };
+  }
+
+  const event = localDateTimeAt(reminder.eventAtMs, timezone);
+  if (reminder.leadMinutes !== null) {
+    return {
+      kind: "event",
+      eventDate: event.date,
+      eventTime: event.time,
+      reminderDate: null,
+      reminderTime: null,
+      reminderDaypart: null,
+      minutesBefore: reminder.leadMinutes,
+    };
+  }
+
+  return {
+    kind: "event",
+    eventDate: event.date,
+    eventTime: event.time,
+    reminderDate: notification.date,
+    reminderTime: notification.time,
+    reminderDaypart: null,
+    minutesBefore: null,
+  };
+}
+
 function directReply(title: string, timing: TimingResolution & { ok: true }, timezone: string): string {
   const reminder = localDateTimeAt(timing.scheduledAtMs, timezone);
   if (timing.eventAtMs === null) {
@@ -200,27 +240,21 @@ function directReply(title: string, timing: TimingResolution & { ok: true }, tim
 
 export function createReminderTools(
   reminders: ReminderRepository,
-  contexts: ConversationContextRepository,
   timezone: string,
 ): ToolRegistration[] {
   return [
     {
       name: "reminder_schedule",
       description:
-        "Create a reminder. kind=event means eventDate/eventTime describe the real event and notification is separate. Event reminders default to 30 minutes before when no reminder trigger is provided. kind=standalone means reminderDate/reminderTime/daypart is the notification itself. Dayparts are resolved by the application (morning=08:00, afternoon=15:00, evening=19:00).",
+        "Create a reminder. kind=event means eventDate/eventTime describe the real event and notification is separate. Event reminders default to 30 minutes before when no reminder trigger is provided. kind=standalone means reminderDate/reminderTime/daypart is the notification itself. Use null for genuinely missing information so the tool can ask one clarification.",
       schema: scheduleSchema,
       execute(raw, context) {
         const input = scheduleSchema.parse(raw);
         const missing = missingForSchedule(input);
         if (missing.length > 0) {
-          contexts.setPending(
-            context.ownerKey,
-            { tool: "reminder_schedule", arguments: input, missingInformation: missing },
-            context.nowMs,
-          );
           return {
             ok: true,
-            data: { status: "needs_clarification", missingInformation: missing },
+            data: { status: "needs_clarification", missingInformation: missing, draft: input },
             directReply: clarificationQuestion(missing),
           };
         }
@@ -244,17 +278,6 @@ export function createReminderTools(
           leadMinutes: timing.leadMinutes,
           sourceKey: `${context.sourceMessageKey}:reminder:${context.toolCallIndex}`,
         });
-        contexts.clearPending(context.ownerKey, context.nowMs);
-        contexts.setLastEntity(
-          context.ownerKey,
-          {
-            type: "reminder",
-            id: reminder.id,
-            action: "created",
-            data: { title: reminder.title, ...timing.normalized },
-          },
-          context.nowMs,
-        );
 
         return {
           ok: true,
@@ -266,6 +289,7 @@ export function createReminderTools(
               event: reminder.eventAtMs ? localDateTimeAt(reminder.eventAtMs, timezone) : null,
               notification: localDateTimeAt(reminder.scheduledAtMs, timezone),
               leadMinutes: reminder.leadMinutes,
+              rule: timing.normalized,
             },
           },
           directReply: directReply(reminder.title, timing, timezone),
@@ -275,23 +299,23 @@ export function createReminderTools(
     {
       name: "reminder_update",
       description:
-        "Update the recent pending reminder. eventDate/eventTime change the real event; reminderDate/reminderTime/reminderDaypart/minutesBefore change notification timing. If no notification field is changed, preserve the previous notification rule (including the default 30-minute lead). Never invent a reminder id.",
+        "Update an existing pending reminder using its real id from prior tool history or reminder_list. Null timing fields mean unchanged. eventDate/eventTime change the real event; reminderDate/reminderTime/reminderDaypart/minutesBefore change notification timing.",
       schema: updateSchema,
       execute(raw, context) {
         const input = updateSchema.parse(raw);
-        const snapshot = contexts.get(context.ownerKey, context.nowMs);
-        const reminderId = input.reminderId ??
-          (snapshot.lastEntity?.type === "reminder" ? snapshot.lastEntity.id : undefined);
-        if (!reminderId) {
-          return { ok: false, error: { code: "NO_REMINDER_CONTEXT", message: "No recent reminder is available to update." } };
-        }
-        const current = reminders.getById(reminderId);
+        const current = reminders.getById(input.reminderId);
         if (!current || current.status !== "pending") {
-          return { ok: false, error: { code: "REMINDER_NOT_UPDATABLE", message: "The reminder does not exist or is no longer pending." } };
+          return {
+            ok: false,
+            error: {
+              code: "REMINDER_NOT_UPDATABLE",
+              message: "The reminder does not exist or is no longer pending.",
+            },
+          };
         }
 
-        const previous = (snapshot.lastEntity?.type === "reminder" ? snapshot.lastEntity.data : {}) as Record<string, unknown>;
-        const triggerChanged =
+        const base = currentTiming(current, timezone);
+        const notificationChanged =
           input.reminderDate !== null ||
           input.reminderTime !== null ||
           input.reminderDaypart !== null ||
@@ -299,25 +323,20 @@ export function createReminderTools(
 
         const merged: ScheduleInput = {
           title: current.title,
-          kind: input.kind ?? (previous.kind as "event" | "standalone" | undefined) ?? (current.eventAtMs ? "event" : "standalone"),
-          eventDate: input.eventDate ?? (previous.eventDate as string | null | undefined) ?? null,
-          eventTime: input.eventTime ?? (previous.eventTime as string | null | undefined) ?? null,
-          reminderDate: triggerChanged ? input.reminderDate : ((previous.reminderDate as string | null | undefined) ?? null),
-          reminderTime: triggerChanged ? input.reminderTime : ((previous.reminderTime as string | null | undefined) ?? null),
-          reminderDaypart: triggerChanged ? input.reminderDaypart : ((previous.reminderDaypart as "morning" | "afternoon" | "evening" | null | undefined) ?? null),
-          minutesBefore: triggerChanged ? input.minutesBefore : ((previous.minutesBefore as number | null | undefined) ?? current.leadMinutes ?? null),
+          kind: input.kind ?? base.kind,
+          eventDate: input.eventDate ?? base.eventDate,
+          eventTime: input.eventTime ?? base.eventTime,
+          reminderDate: notificationChanged ? input.reminderDate : base.reminderDate,
+          reminderTime: notificationChanged ? input.reminderTime : base.reminderTime,
+          reminderDaypart: notificationChanged ? input.reminderDaypart : base.reminderDaypart,
+          minutesBefore: notificationChanged ? input.minutesBefore : base.minutesBefore,
         };
 
         const missing = missingForSchedule(merged);
         if (missing.length > 0) {
-          contexts.setPending(
-            context.ownerKey,
-            { tool: "reminder_update", arguments: { ...merged, reminderId }, missingInformation: missing },
-            context.nowMs,
-          );
           return {
             ok: true,
-            data: { status: "needs_clarification", missingInformation: missing },
+            data: { status: "needs_clarification", missingInformation: missing, draft: merged },
             directReply: clarificationQuestion(missing),
           };
         }
@@ -331,21 +350,21 @@ export function createReminderTools(
           return { ok: false, error: { code: "REMINDER_IN_PAST", message: "The reminder time must be in the future." } };
         }
 
-        const updated = reminders.updateTiming(reminderId, {
+        const updated = reminders.updateTiming(input.reminderId, {
           eventAtMs: timing.eventAtMs,
           scheduledAtMs: timing.scheduledAtMs,
           leadMinutes: timing.leadMinutes,
         });
         if (!updated) {
-          return { ok: false, error: { code: "REMINDER_NOT_UPDATABLE", message: "The reminder does not exist or is no longer pending." } };
+          return {
+            ok: false,
+            error: {
+              code: "REMINDER_NOT_UPDATABLE",
+              message: "The reminder does not exist or is no longer pending.",
+            },
+          };
         }
 
-        contexts.clearPending(context.ownerKey, context.nowMs);
-        contexts.setLastEntity(
-          context.ownerKey,
-          { type: "reminder", id: updated.id, action: "updated", data: { title: updated.title, ...timing.normalized } },
-          context.nowMs,
-        );
         const reply = directReply(updated.title, timing, timezone).replace(/^Gotowe\./, "Zmienione.");
         return {
           ok: true,
@@ -357,6 +376,7 @@ export function createReminderTools(
               event: updated.eventAtMs ? localDateTimeAt(updated.eventAtMs, timezone) : null,
               notification: localDateTimeAt(updated.scheduledAtMs, timezone),
               leadMinutes: updated.leadMinutes,
+              rule: timing.normalized,
             },
           },
           directReply: reply,
@@ -374,18 +394,28 @@ export function createReminderTools(
         const fromDate = input.fromDate ?? today;
         const throughDate = input.throughDate ?? addCalendarDays(fromDate, 6);
         if (throughDate < fromDate) {
-          return { ok: false, error: { code: "INVALID_RANGE", message: "throughDate must not be before fromDate." } };
+          return {
+            ok: false,
+            error: { code: "INVALID_RANGE", message: "throughDate must not be before fromDate." },
+          };
         }
 
         const start = resolveLocalDateTime(fromDate, "00:00", timezone);
         const end = resolveLocalDateTime(addCalendarDays(throughDate, 1), "00:00", timezone);
         if (!start.ok || !end.ok) {
-          return { ok: false, error: { code: "INVALID_RANGE", message: "Could not resolve the requested date range." } };
+          return {
+            ok: false,
+            error: { code: "INVALID_RANGE", message: "Could not resolve the requested date range." },
+          };
         }
 
         const rows = reminders.listBetween(start.epochMs, end.epochMs, input.limit);
         if (rows.length === 0) {
-          return { ok: true, data: { reminders: [] }, directReply: "Nie masz zaplanowanych przypomnień w tym okresie." };
+          return {
+            ok: true,
+            data: { reminders: [] },
+            directReply: "Nie masz zaplanowanych przypomnień w tym okresie.",
+          };
         }
         return {
           ok: true,

@@ -1,60 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import { z } from "zod";
+import type { ConversationMessage } from "../context/repository";
 import { ToolPolicy, ToolRegistry } from "../tools/registry";
 import { OpenRouterAgentClient } from "./agent";
 
 describe("OpenRouterAgentClient", () => {
-  test("executes a native tool call and feeds its result back to the model", async () => {
-    const registry = new ToolRegistry(
-      [
-        {
-          name: "reminder_list",
-          description: "List reminders",
-          schema: z.object({ limit: z.number().int() }).strict(),
-          execute: () => ({ ok: true, data: { reminders: [{ title: "dentysta" }] } }),
-        },
-      ],
-      new ToolPolicy(["reminder_list"]),
-    );
+  test("sends the active conversation history before the new user message", async () => {
+    const registry = new ToolRegistry([], new ToolPolicy([]));
+    const history: ConversationMessage[] = [
+      { role: "user", content: "Lekarz jutro o" },
+      { role: "assistant", content: "O której godzinie masz wizytę u lekarza?" },
+    ];
 
-    let calls = 0;
     const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      calls += 1;
       const body = JSON.parse(String(init?.body));
-      expect(body.response_format).toBeUndefined();
-      expect(body.tools[0].function.name).toBe("reminder_list");
-      expect(body.tools[0].function.parameters.$schema).toBeUndefined();
-
-      if (calls === 1) {
-        const system = body.messages[0].content as string;
-        expect(system).toContain("pendingAction");
-        expect(system).toContain("Current local date: 2026-08-20");
-        expect(system).toContain("Current local time: 20:00");
-        return Response.json({
-          choices: [
-            {
-              message: {
-                role: "assistant",
-                content: null,
-                tool_calls: [
-                  {
-                    id: "call-1",
-                    type: "function",
-                    function: { name: "reminder_list", arguments: JSON.stringify({ limit: 10 }) },
-                  },
-                ],
-              },
-            },
-          ],
-        });
-      }
-
-      const toolMessage = body.messages.at(-1);
-      expect(toolMessage.role).toBe("tool");
-      expect(toolMessage.tool_call_id).toBe("call-1");
-      expect(JSON.parse(toolMessage.content).data.reminders[0].title).toBe("dentysta");
+      expect(body.messages[1]).toEqual(history[0]);
+      expect(body.messages[2]).toEqual(history[1]);
+      expect(body.messages[3]).toEqual({ role: "user", content: "13" });
       return Response.json({
-        choices: [{ message: { role: "assistant", content: "Masz przypomnienie: dentysta." } }],
+        choices: [{ message: { role: "assistant", content: "Rozumiem: lekarz jutro o 13:00." } }],
       });
     }) as typeof fetch;
 
@@ -63,25 +27,23 @@ describe("OpenRouterAgentClient", () => {
       registry,
       fetchImpl,
     );
+
     const response = await agent.respond({
-      text: "co mam ustawione?",
+      text: "13",
       ownerKey: "owner",
-      sourceMessageKey: "signal:1",
-      conversation: {
-        pendingAction: {
-          tool: "reminder_schedule",
-          arguments: { title: "dentysta", time: null },
-          missingInformation: ["time"],
-        },
-      },
-      now: new Date("2026-08-20T18:00:00Z"),
+      sourceMessageKey: "signal:2",
+      history,
+      now: new Date("2026-08-21T08:00:00Z"),
     });
 
-    expect(response).toBe("Masz przypomnienie: dentysta.");
-    expect(calls).toBe(2);
+    expect(response.text).toContain("13:00");
+    expect(response.messages).toEqual([
+      { role: "user", content: "13" },
+      { role: "assistant", content: "Rozumiem: lekarz jutro o 13:00." },
+    ]);
   });
 
-  test("uses a deterministic direct reply without a second model round", async () => {
+  test("persists tool calls, tool results and deterministic direct reply as conversation messages", async () => {
     const registry = new ToolRegistry(
       [
         {
@@ -90,18 +52,16 @@ describe("OpenRouterAgentClient", () => {
           schema: z.object({ time: z.string().nullable() }).strict(),
           execute: () => ({
             ok: true,
-            data: { status: "needs_clarification" },
-            directReply: "O której?",
+            data: { status: "needs_clarification", draft: { time: null } },
+            directReply: "O której jest wydarzenie?",
           }),
         },
       ],
       new ToolPolicy(["reminder_schedule"]),
     );
 
-    let calls = 0;
-    const fetchImpl = (async () => {
-      calls += 1;
-      return Response.json({
+    const fetchImpl = (async () =>
+      Response.json({
         choices: [
           {
             message: {
@@ -111,29 +71,42 @@ describe("OpenRouterAgentClient", () => {
                 {
                   id: "call-1",
                   type: "function",
-                  function: { name: "reminder_schedule", arguments: JSON.stringify({ time: null }) },
+                  function: {
+                    name: "reminder_schedule",
+                    arguments: JSON.stringify({ time: null }),
+                  },
                 },
               ],
             },
           },
         ],
-      });
-    }) as typeof fetch;
+      })) as typeof fetch;
 
     const agent = new OpenRouterAgentClient(
       { apiKey: "test", model: "deepseek/test", timezone: "Europe/Warsaw" },
       registry,
       fetchImpl,
     );
+
     const response = await agent.respond({
-      text: "dentysta jutro o",
+      text: "lekarz jutro o",
       ownerKey: "owner",
       sourceMessageKey: "signal:1",
-      conversation: {},
-      now: new Date("2026-08-20T18:00:00Z"),
+      history: [],
+      now: new Date("2026-08-21T08:00:00Z"),
     });
 
-    expect(response).toBe("O której?");
-    expect(calls).toBe(1);
+    expect(response.text).toBe("O której jest wydarzenie?");
+    expect(response.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+    expect(response.messages[1]).toMatchObject({
+      role: "assistant",
+      tool_calls: [{ id: "call-1" }],
+    });
+    expect(response.messages[2]).toMatchObject({ role: "tool", tool_call_id: "call-1" });
   });
 });

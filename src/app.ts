@@ -1,5 +1,5 @@
 import { OpenRouterAgentClient } from "./ai/agent";
-import type { ConversationContextRepository } from "./context/repository";
+import type { ConversationHistoryRepository } from "./context/repository";
 import { logger } from "./logger";
 import { SignalClient } from "./signal/client";
 import type { IncomingDirectMessage } from "./signal/types";
@@ -8,7 +8,7 @@ export class AssistantApp {
   constructor(
     private readonly signal: SignalClient,
     private readonly agent: OpenRouterAgentClient,
-    private readonly contexts: ConversationContextRepository,
+    private readonly history: ConversationHistoryRepository,
     private readonly ownerNumber: string,
     private readonly ownerKey: string,
   ) {}
@@ -27,7 +27,8 @@ export class AssistantApp {
     }
 
     try {
-      const conversation = this.contexts.get(this.ownerKey);
+      const now = Date.now();
+      const conversationHistory = this.history.getHistory(this.ownerKey, now);
       const sourceMessageKey = message.timestamp
         ? `signal:${message.timestamp}`
         : `signal:${crypto.randomUUID()}`;
@@ -35,13 +36,17 @@ export class AssistantApp {
         text: message.text,
         ownerKey: this.ownerKey,
         sourceMessageKey,
-        conversation,
+        history: conversationHistory,
+        now: new Date(now),
       });
+
+      await this.signal.sendMessage(this.ownerNumber, response.text);
+      this.history.append(this.ownerKey, response.messages, now);
+
       logger.info("Authorized Signal message handled", {
-        hadPendingAction: Boolean(conversation.pendingAction),
-        hadRecentEntity: Boolean(conversation.lastEntity),
+        historyMessages: conversationHistory.length,
+        persistedMessages: response.messages.length,
       });
-      await this.signal.sendMessage(this.ownerNumber, response);
     } catch (error) {
       logger.error("Failed to handle authorized Signal message", {
         error: error instanceof Error ? error.message : String(error),

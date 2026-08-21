@@ -4,7 +4,7 @@ import { dirname } from "node:path";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import * as schema from "./schema";
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 export function createDatabase(path: string) {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
@@ -106,6 +106,17 @@ export function createDatabase(path: string) {
         CREATE INDEX conversation_turns_owner_created_idx
           ON conversation_turns(owner_key, created_at_ms);
         PRAGMA user_version = 4;
+      `);
+    });
+    migrate();
+  }
+
+  const afterV4 = sqlite.query("PRAGMA user_version").get() as { user_version: number };
+  if (afterV4.user_version < 5) {
+    const migrate = sqlite.transaction(() => {
+      sqlite.exec(`
+        ALTER TABLE conversation_turns ADD COLUMN message_json TEXT;
+        PRAGMA user_version = 5;
       `);
     });
     migrate();

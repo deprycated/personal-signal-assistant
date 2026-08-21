@@ -1,238 +1,112 @@
-import { and, desc, eq, gte, inArray, lt } from "drizzle-orm";
+import { desc, eq, lt } from "drizzle-orm";
 import type { AppDatabase } from "../db/database";
-import { conversationContext, conversationTurns, type ConversationTurnRole } from "../db/schema";
+import { conversationTurns, type ConversationTurnRole } from "../db/schema";
 
-export const RECENT_TURN_LIMIT = 8;
-export const RECENT_TURN_TTL_MS = 24 * 60 * 60_000;
-const MAX_TURN_CONTENT_LENGTH = 4_000;
+export const CONVERSATION_IDLE_TIMEOUT_MS = 24 * 60 * 60_000;
+export const MAX_CONTEXT_MESSAGES = 100;
+const HISTORY_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
-export type PendingAction = {
-  tool: string;
-  arguments: Record<string, unknown>;
-  missingInformation: string[];
-};
-
-export type RecentEntity = {
-  type: string;
+export type ConversationToolCall = {
   id: string;
-  action: string;
-  data: Record<string, unknown>;
+  type: "function";
+  function: {
+    name: string;
+    arguments: string;
+  };
 };
 
-export type ConversationTurn = {
+export type ConversationMessage =
+  | { role: "user"; content: string }
+  | { role: "assistant"; content: string | null; tool_calls?: ConversationToolCall[] }
+  | { role: "tool"; tool_call_id: string; name: string; content: string };
+
+function parseStoredMessage(row: {
   role: ConversationTurnRole;
   content: string;
-  createdAtMs: number;
-};
-
-export type ConversationSnapshot = {
-  pendingAction?: PendingAction;
-  lastEntity?: RecentEntity;
-  recentTurns?: ConversationTurn[];
-};
-
-function parseObject(value: string | null): Record<string, unknown> {
-  if (!value) return {};
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
+  messageJson: string | null;
+}): ConversationMessage | undefined {
+  if (row.messageJson) {
+    try {
+      const parsed = JSON.parse(row.messageJson) as ConversationMessage;
+      if (parsed && typeof parsed === "object" && "role" in parsed) return parsed;
+    } catch {
+      // Fall back to legacy plain-text rows below.
+    }
   }
+
+  if (row.role === "user") return { role: "user", content: row.content };
+  if (row.role === "assistant") return { role: "assistant", content: row.content };
+  return undefined;
 }
 
-function parseStringArray(value: string | null): string[] {
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
+function legacyContent(message: ConversationMessage): string {
+  if (message.role === "tool") return message.content;
+  return message.content ?? "";
 }
 
-function boundedContent(content: string): string {
-  return content.trim().slice(0, MAX_TURN_CONTENT_LENGTH);
-}
-
-export class ConversationContextRepository {
+export class ConversationHistoryRepository {
   constructor(private readonly database: AppDatabase) {}
 
-  get(ownerKey: string, nowMs = Date.now()): ConversationSnapshot {
-    const row = this.database.db
-      .select()
-      .from(conversationContext)
-      .where(eq(conversationContext.ownerKey, ownerKey))
-      .limit(1)
-      .get();
-
-    const snapshot: ConversationSnapshot = {};
-    if (row?.pendingTool && row.pendingExpiresAtMs && row.pendingExpiresAtMs > nowMs) {
-      snapshot.pendingAction = {
-        tool: row.pendingTool,
-        arguments: parseObject(row.pendingArgumentsJson),
-        missingInformation: parseStringArray(row.missingInformationJson),
-      };
-    }
-
-    if (
-      row?.lastEntityType &&
-      row.lastEntityId &&
-      row.lastAction &&
-      row.lastEntityExpiresAtMs &&
-      row.lastEntityExpiresAtMs > nowMs
-    ) {
-      snapshot.lastEntity = {
-        type: row.lastEntityType,
-        id: row.lastEntityId,
-        action: row.lastAction,
-        data: parseObject(row.lastEntityJson),
-      };
-    }
-
-    const recentTurns = this.database.db
+  getHistory(ownerKey: string, nowMs = Date.now()): ConversationMessage[] {
+    const rows = this.database.db
       .select({
         id: conversationTurns.id,
         role: conversationTurns.role,
         content: conversationTurns.content,
+        messageJson: conversationTurns.messageJson,
         createdAtMs: conversationTurns.createdAtMs,
       })
       .from(conversationTurns)
-      .where(
-        and(
-          eq(conversationTurns.ownerKey, ownerKey),
-          gte(conversationTurns.createdAtMs, nowMs - RECENT_TURN_TTL_MS),
-        ),
-      )
+      .where(eq(conversationTurns.ownerKey, ownerKey))
       .orderBy(desc(conversationTurns.createdAtMs), desc(conversationTurns.id))
-      .limit(RECENT_TURN_LIMIT)
+      .limit(MAX_CONTEXT_MESSAGES)
       .all()
-      .reverse()
-      .map(({ role, content, createdAtMs }) => ({ role, content, createdAtMs }));
+      .reverse();
 
-    if (recentTurns.length > 0) snapshot.recentTurns = recentTurns;
-    return snapshot;
+    if (rows.length === 0) return [];
+    const last = rows.at(-1);
+    if (!last || nowMs - last.createdAtMs > CONVERSATION_IDLE_TIMEOUT_MS) return [];
+
+    let sessionStart = 0;
+    for (let index = 1; index < rows.length; index += 1) {
+      if (rows[index]!.createdAtMs - rows[index - 1]!.createdAtMs > CONVERSATION_IDLE_TIMEOUT_MS) {
+        sessionStart = index;
+      }
+    }
+
+    const messages: ConversationMessage[] = [];
+    for (const row of rows.slice(sessionStart)) {
+      const parsed = parseStoredMessage(row);
+      if (parsed) messages.push(parsed);
+    }
+
+    // A capped history must never start with an orphaned tool/assistant fragment.
+    const firstUser = messages.findIndex((message) => message.role === "user");
+    return firstUser >= 0 ? messages.slice(firstUser) : [];
   }
 
-  appendExchange(
-    ownerKey: string,
-    userContent: string,
-    assistantContent: string,
-    nowMs = Date.now(),
-  ): void {
-    const user = boundedContent(userContent);
-    const assistant = boundedContent(assistantContent);
-    if (!user || !assistant) return;
+  append(ownerKey: string, messages: readonly ConversationMessage[], nowMs = Date.now()): void {
+    if (messages.length === 0) return;
 
     const commit = this.database.sqlite.transaction(() => {
-      this.database.db
-        .insert(conversationTurns)
-        .values({ ownerKey, role: "user", content: user, createdAtMs: nowMs })
-        .run();
-      this.database.db
-        .insert(conversationTurns)
-        .values({ ownerKey, role: "assistant", content: assistant, createdAtMs: nowMs + 1 })
-        .run();
+      messages.forEach((message, index) => {
+        this.database.db
+          .insert(conversationTurns)
+          .values({
+            ownerKey,
+            role: message.role,
+            content: legacyContent(message),
+            messageJson: JSON.stringify(message),
+            createdAtMs: nowMs + index,
+          })
+          .run();
+      });
 
       this.database.db
         .delete(conversationTurns)
-        .where(
-          and(
-            eq(conversationTurns.ownerKey, ownerKey),
-            lt(conversationTurns.createdAtMs, nowMs - RECENT_TURN_TTL_MS),
-          ),
-        )
+        .where(lt(conversationTurns.createdAtMs, nowMs - HISTORY_RETENTION_MS))
         .run();
-
-      const overflow = this.database.db
-        .select({ id: conversationTurns.id })
-        .from(conversationTurns)
-        .where(eq(conversationTurns.ownerKey, ownerKey))
-        .orderBy(desc(conversationTurns.createdAtMs), desc(conversationTurns.id))
-        .all()
-        .slice(RECENT_TURN_LIMIT)
-        .map((row) => row.id);
-
-      if (overflow.length > 0) {
-        this.database.db.delete(conversationTurns).where(inArray(conversationTurns.id, overflow)).run();
-      }
     });
     commit();
-  }
-
-  setPending(
-    ownerKey: string,
-    pending: PendingAction,
-    nowMs = Date.now(),
-    ttlMs = 24 * 60 * 60_000,
-  ): void {
-    this.database.db
-      .insert(conversationContext)
-      .values({
-        ownerKey,
-        pendingTool: pending.tool,
-        pendingArgumentsJson: JSON.stringify(pending.arguments),
-        missingInformationJson: JSON.stringify(pending.missingInformation),
-        pendingExpiresAtMs: nowMs + ttlMs,
-        updatedAtMs: nowMs,
-      })
-      .onConflictDoUpdate({
-        target: conversationContext.ownerKey,
-        set: {
-          pendingTool: pending.tool,
-          pendingArgumentsJson: JSON.stringify(pending.arguments),
-          missingInformationJson: JSON.stringify(pending.missingInformation),
-          pendingExpiresAtMs: nowMs + ttlMs,
-          updatedAtMs: nowMs,
-        },
-      })
-      .run();
-  }
-
-  clearPending(ownerKey: string, nowMs = Date.now()): void {
-    this.database.db
-      .update(conversationContext)
-      .set({
-        pendingTool: null,
-        pendingArgumentsJson: null,
-        missingInformationJson: null,
-        pendingExpiresAtMs: null,
-        updatedAtMs: nowMs,
-      })
-      .where(eq(conversationContext.ownerKey, ownerKey))
-      .run();
-  }
-
-  setLastEntity(
-    ownerKey: string,
-    entity: RecentEntity,
-    nowMs = Date.now(),
-    ttlMs = 6 * 60 * 60_000,
-  ): void {
-    this.database.db
-      .insert(conversationContext)
-      .values({
-        ownerKey,
-        lastEntityType: entity.type,
-        lastEntityId: entity.id,
-        lastAction: entity.action,
-        lastEntityJson: JSON.stringify(entity.data),
-        lastEntityExpiresAtMs: nowMs + ttlMs,
-        updatedAtMs: nowMs,
-      })
-      .onConflictDoUpdate({
-        target: conversationContext.ownerKey,
-        set: {
-          lastEntityType: entity.type,
-          lastEntityId: entity.id,
-          lastAction: entity.action,
-          lastEntityJson: JSON.stringify(entity.data),
-          lastEntityExpiresAtMs: nowMs + ttlMs,
-          updatedAtMs: nowMs,
-        },
-      })
-      .run();
   }
 }

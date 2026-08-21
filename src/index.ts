@@ -1,14 +1,13 @@
 import { OpenRouterAgentClient } from "./ai/agent";
 import { AssistantApp } from "./app";
 import { loadConfig } from "./config";
-import { ConversationContextRepository } from "./context/repository";
+import { ConversationHistoryRepository } from "./context/repository";
 import { createDatabase } from "./db/database";
 import { logger } from "./logger";
 import { ReminderRepository } from "./reminders/repository";
 import { ReminderScheduler } from "./reminders/scheduler";
 import { SignalClient } from "./signal/client";
 import { SignalListener } from "./signal/listener";
-import { createContextTools } from "./tools/context-tools";
 import { createReminderTools } from "./tools/reminder-tools";
 import { ToolPolicy, ToolRegistry } from "./tools/registry";
 
@@ -16,7 +15,7 @@ const config = loadConfig();
 const database = createDatabase(config.dbPath);
 const signalClient = new SignalClient(config.signalApiUrl, config.signalBotNumber);
 const reminders = new ReminderRepository(database);
-const contexts = new ConversationContextRepository(database);
+const history = new ConversationHistoryRepository(database);
 const reminderScheduler = new ReminderScheduler(
   reminders,
   signalClient,
@@ -24,18 +23,10 @@ const reminderScheduler = new ReminderScheduler(
   config.reminderPollMs,
 );
 
-const allowedTools = [
-  "reminder_schedule",
-  "reminder_update",
-  "reminder_list",
-  "conversation_cancel_pending",
-] as const;
+const allowedTools = ["reminder_schedule", "reminder_update", "reminder_list"] as const;
 const toolPolicy = new ToolPolicy(allowedTools);
 const toolRegistry = new ToolRegistry(
-  [
-    ...createReminderTools(reminders, contexts, config.assistantTimezone),
-    ...createContextTools(contexts),
-  ],
+  createReminderTools(reminders, config.assistantTimezone),
   toolPolicy,
 );
 const agent = new OpenRouterAgentClient(
@@ -47,13 +38,7 @@ const agent = new OpenRouterAgentClient(
   toolRegistry,
 );
 const ownerKey = config.signalOwnerUuid ?? config.signalOwnerNumber;
-const app = new AssistantApp(
-  signalClient,
-  agent,
-  contexts,
-  config.signalOwnerNumber,
-  ownerKey,
-);
+const app = new AssistantApp(signalClient, agent, history, config.signalOwnerNumber, ownerKey);
 const listener = new SignalListener(config, (message) => app.handleMessage(message));
 
 const server = Bun.serve({

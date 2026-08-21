@@ -1,18 +1,15 @@
 import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export type ReminderStatus = "pending" | "sending" | "sent" | "failed";
-export type ConversationTurnRole = "user" | "assistant";
+export type ConversationTurnRole = "user" | "assistant" | "tool";
 
 export const reminders = sqliteTable(
   "reminders",
   {
     id: text("id").primaryKey(),
     title: text("title").notNull(),
-    // Optional occurrence time of the real-world event/appointment.
     eventAtMs: integer("event_at_ms"),
-    // Actual time at which the Signal notification is delivered.
     scheduledAtMs: integer("scheduled_at_ms").notNull(),
-    // When non-null, scheduledAtMs is relative to eventAtMs by this many minutes.
     leadMinutes: integer("lead_minutes"),
     nextAttemptAtMs: integer("next_attempt_at_ms").notNull(),
     status: text("status").$type<ReminderStatus>().notNull().default("pending"),
@@ -26,20 +23,6 @@ export const reminders = sqliteTable(
   (table) => [uniqueIndex("reminders_source_key_unique").on(table.sourceKey)],
 );
 
-export const conversationContext = sqliteTable("conversation_context", {
-  ownerKey: text("owner_key").primaryKey(),
-  pendingTool: text("pending_tool"),
-  pendingArgumentsJson: text("pending_arguments_json"),
-  missingInformationJson: text("missing_information_json"),
-  pendingExpiresAtMs: integer("pending_expires_at_ms"),
-  lastEntityType: text("last_entity_type"),
-  lastEntityId: text("last_entity_id"),
-  lastAction: text("last_action"),
-  lastEntityJson: text("last_entity_json"),
-  lastEntityExpiresAtMs: integer("last_entity_expires_at_ms"),
-  updatedAtMs: integer("updated_at_ms").notNull(),
-});
-
 export const conversationTurns = sqliteTable(
   "conversation_turns",
   {
@@ -47,6 +30,7 @@ export const conversationTurns = sqliteTable(
     ownerKey: text("owner_key").notNull(),
     role: text("role").$type<ConversationTurnRole>().notNull(),
     content: text("content").notNull(),
+    messageJson: text("message_json"),
     createdAtMs: integer("created_at_ms").notNull(),
   },
   (table) => [index("conversation_turns_owner_created_idx").on(table.ownerKey, table.createdAtMs)],

@@ -1,63 +1,78 @@
 import { describe, expect, test } from "bun:test";
 import { createDatabase } from "../db/database";
-import { ConversationContextRepository } from "./repository";
+import {
+  CONVERSATION_IDLE_TIMEOUT_MS,
+  ConversationHistoryRepository,
+  type ConversationMessage,
+} from "./repository";
 
-describe("ConversationContextRepository", () => {
-  test("stores a pending action and expires it", () => {
+describe("ConversationHistoryRepository", () => {
+  test("keeps the current conversation and resets context after 24 hours of inactivity", () => {
     const database = createDatabase(":memory:");
     try {
-      const contexts = new ConversationContextRepository(database);
-      contexts.setPending(
+      const history = new ConversationHistoryRepository(database);
+      const start = 1_000;
+      history.append(
         "owner",
-        {
-          tool: "reminder_schedule",
-          arguments: { title: "dentysta", date: "2026-08-21", time: null },
-          missingInformation: ["time"],
-        },
-        1_000,
-        500,
+        [
+          { role: "user", content: "Lekarz jutro o" },
+          { role: "assistant", content: "O której godzinie masz wizytę?" },
+        ],
+        start,
       );
 
-      expect(contexts.get("owner", 1_400).pendingAction).toEqual({
-        tool: "reminder_schedule",
-        arguments: { title: "dentysta", date: "2026-08-21", time: null },
-        missingInformation: ["time"],
-      });
-      expect(contexts.get("owner", 1_501).pendingAction).toBeUndefined();
+      expect(history.getHistory("owner", start + CONVERSATION_IDLE_TIMEOUT_MS - 1)).toHaveLength(2);
+      expect(history.getHistory("owner", start + CONVERSATION_IDLE_TIMEOUT_MS + 10)).toEqual([]);
+
+      history.append(
+        "owner",
+        [
+          { role: "user", content: "Nowa rozmowa" },
+          { role: "assistant", content: "Tak?" },
+        ],
+        start + CONVERSATION_IDLE_TIMEOUT_MS + 20,
+      );
+
+      expect(history.getHistory("owner", start + CONVERSATION_IDLE_TIMEOUT_MS + 30)).toEqual([
+        { role: "user", content: "Nowa rozmowa" },
+        { role: "assistant", content: "Tak?" },
+      ]);
     } finally {
       database.close();
     }
   });
 
-  test("clearing pending context keeps the recent entity", () => {
+  test("round-trips assistant tool calls and tool results", () => {
     const database = createDatabase(":memory:");
     try {
-      const contexts = new ConversationContextRepository(database);
-      contexts.setPending(
-        "owner",
+      const history = new ConversationHistoryRepository(database);
+      const messages: ConversationMessage[] = [
+        { role: "user", content: "lekarz jutro o" },
         {
-          tool: "reminder_schedule",
-          arguments: { title: "dentysta" },
-          missingInformation: ["time"],
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call-1",
+              type: "function",
+              function: {
+                name: "reminder_schedule",
+                arguments: JSON.stringify({ title: "lekarz", eventTime: null }),
+              },
+            },
+          ],
         },
-        1_000,
-      );
-      contexts.setLastEntity(
-        "owner",
         {
-          type: "reminder",
-          id: "reminder-1",
-          action: "created",
-          data: { title: "dentysta", date: "2026-08-21", time: "13:00" },
+          role: "tool",
+          tool_call_id: "call-1",
+          name: "reminder_schedule",
+          content: JSON.stringify({ ok: true, data: { status: "needs_clarification" } }),
         },
-        1_000,
-      );
-      contexts.clearPending("owner", 1_100);
+        { role: "assistant", content: "O której jest wydarzenie?" },
+      ];
 
-      const snapshot = contexts.get("owner", 1_200);
-      expect(snapshot.pendingAction).toBeUndefined();
-      expect(snapshot.lastEntity?.id).toBe("reminder-1");
-      expect(snapshot.lastEntity?.data.time).toBe("13:00");
+      history.append("owner", messages, 10_000);
+      expect(history.getHistory("owner", 11_000)).toEqual(messages);
     } finally {
       database.close();
     }
