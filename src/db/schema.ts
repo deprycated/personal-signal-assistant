@@ -1,6 +1,7 @@
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 export type ReminderStatus = "pending" | "sending" | "sent" | "failed";
+export type ConversationTurnRole = "user" | "assistant";
 
 export const reminders = sqliteTable(
   "reminders",
@@ -38,6 +39,18 @@ export const conversationContext = sqliteTable("conversation_context", {
   lastEntityExpiresAtMs: integer("last_entity_expires_at_ms"),
   updatedAtMs: integer("updated_at_ms").notNull(),
 });
+
+export const conversationTurns = sqliteTable(
+  "conversation_turns",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    ownerKey: text("owner_key").notNull(),
+    role: text("role").$type<ConversationTurnRole>().notNull(),
+    content: text("content").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+  },
+  (table) => [index("conversation_turns_owner_created_idx").on(table.ownerKey, table.createdAtMs)],
+);
 
 export const auditLog = sqliteTable("audit_log", {
   id: integer("id").primaryKey({ autoIncrement: true }),
